@@ -31,7 +31,7 @@ def test_single_model_config_is_reported_honestly():
     d = LLMRouter(settings()).describe()
     assert d["distinct_models"] == 1
     assert {v["source"] for v in d["roles"].values()} == {"default"}
-    assert all(v["model"] == "deepseek/deepseek-r1" for v in d["roles"].values())
+    assert all(v["model"] == "deepseek/deepseek-r1-0528" for v in d["roles"].values())
 
 
 def test_independent_overrides_per_role():

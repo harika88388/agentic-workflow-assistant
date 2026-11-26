@@ -12,6 +12,7 @@ from app.integrations.errors import (
     GoogleConflictError,
     GoogleNotFoundError,
     GoogleRateLimitError,
+    GoogleServiceDisabledError,
     GoogleTransientError,
 )
 
@@ -33,6 +34,8 @@ def to_error(resp: httpx.Response) -> GoogleAPIError:
     if s == 401:
         return GoogleAuthError(message, s, reason)
     if s == 403:
+        if reason == "accessNotConfigured":
+            return GoogleServiceDisabledError(message, s, reason)
         return (GoogleRateLimitError if reason in RATE_REASONS else GoogleAuthError)(message, s, reason)
     if s in (404, 410):
         return GoogleNotFoundError(message, s, reason)

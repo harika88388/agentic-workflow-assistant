@@ -5,6 +5,7 @@ class GoogleAPIError(Exception):
 
 
 class GoogleAuthError(GoogleAPIError): """401 / insufficient permission: user must reconnect."""
+class GoogleServiceDisabledError(GoogleAPIError): """403 API not enabled in the Google Cloud project."""
 class GoogleNotFoundError(GoogleAPIError): """404 / 410."""
 class GoogleConflictError(GoogleAPIError): """409, e.g. duplicate client-supplied event id."""
 class GoogleRateLimitError(GoogleAPIError): """429 or quota 403."""

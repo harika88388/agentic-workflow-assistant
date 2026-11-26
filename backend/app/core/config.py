@@ -1,9 +1,13 @@
 """Centralised, validated configuration loaded from environment / .env."""
 from functools import lru_cache
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+ENV_FILE = BACKEND_DIR / ".env"
 
 GOOGLE_SCOPES = [
     "openid",
@@ -17,7 +21,7 @@ CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "development"
     database_url: str = "postgresql+psycopg://assistant:assistant@localhost:5432/assistant"
@@ -41,7 +45,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     llm_provider: str = "openrouter"
-    llm_model: str = "deepseek/deepseek-r1"
+    llm_model: str = "deepseek/deepseek-r1-0528"
     # Per-responsibility overrides. Empty = use the default above.
     intent_llm_provider: str = ""
     intent_llm_model: str = ""

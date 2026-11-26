@@ -36,7 +36,7 @@ def _login_error(reason: str) -> RedirectResponse:
 def google_login() -> RedirectResponse:
     """Start the Authorization Code flow. The browser is redirected to Google."""
     settings = get_settings()
-    if not settings.google_client_id:
+    if not all((settings.google_client_id, settings.google_client_secret, settings.google_redirect_uri)):
         return _login_error("not_configured")
     nonce = generate_nonce()
     resp = RedirectResponse(google_oauth.build_authorization_url(create_state_token(nonce)), status_code=302)
@@ -73,11 +73,17 @@ def google_callback(
         tokens = google_oauth.exchange_code(code)
         identity = google_oauth.verify_id_token(tokens.id_token)
     except google_oauth.GoogleOAuthError:
-        log.warning("OAuth callback failed", exc_info=True)
+        log.warning("Google OAuth callback exchange or identity verification failed")
         return _login_error("oauth_failed")
 
-    user = auth_service.upsert_user_with_credentials(db, identity, tokens)
-    db.commit()
+    try:
+        user = auth_service.upsert_user_with_credentials(db, identity, tokens)
+        db.commit()
+        jwt_token = create_access_token(user.id)
+    except Exception as exc:  # noqa: BLE001 - never expose database or encryption details
+        db.rollback()
+        log.warning("Google OAuth callback persistence or session setup failed: %s", type(exc).__name__)
+        return _login_error("oauth_failed")
 
     # Only our own short-lived JWT goes to the browser (URL fragment: never sent to servers/logs).
     jwt_token = create_access_token(user.id)

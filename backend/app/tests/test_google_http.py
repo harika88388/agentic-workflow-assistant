@@ -4,7 +4,7 @@ import pytest
 from app.integrations.calendar.client import CalendarClient
 from app.integrations.errors import (
     GoogleAuthError, GoogleBadRequestError, GoogleConflictError, GoogleNotFoundError,
-    GoogleRateLimitError, GoogleTransientError,
+    GoogleRateLimitError, GoogleServiceDisabledError, GoogleTransientError,
 )
 from app.integrations.gmail.client import GmailClient
 from app.integrations.http import GoogleHTTP
@@ -96,6 +96,14 @@ def test_error_mapping():
         http, _ = make(lambda r, s=status, rs=reason: err(s, rs), max_retries=0)
         with pytest.raises(exc):
             http.request("GET", "/x")
+
+
+def test_access_not_configured_is_distinct_from_reconnect_required():
+    http, _ = make(lambda r: err(403, "accessNotConfigured"), max_retries=0)
+    with pytest.raises(GoogleServiceDisabledError) as exc:
+        http.request("GET", "/x")
+    assert exc.value.reason == "accessNotConfigured"
+    assert exc.value.status == 403
 
 
 def test_non_json_error_body_is_handled():

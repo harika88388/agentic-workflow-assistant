@@ -194,6 +194,7 @@ _ERROR_PREFIX = {
     "llm_not_configured": "The language model isn't configured, so I can't process requests yet",
     "llm_unavailable": "The language model is unavailable right now",
     "google_reconnect_required": "I need access to your Google account again. Please reconnect it",
+    "google_api_not_enabled": "The required Google API is not enabled for this OAuth project",
     "mcp_connection_failed": "I couldn't reach the Google tools service",
 }
 

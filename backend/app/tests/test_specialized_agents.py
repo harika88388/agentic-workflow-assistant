@@ -58,7 +58,7 @@ def test_summarization_agent_reads_emails_then_uses_summarization_role():
     assert a.step(ctx("summarize_emails", {"message_id": "m2"})).tool_calls[0].arguments == {"message_id": "m2"}
     done = a.step(ctx("summarize_emails", {"message_id": "m2"}, results={"read:0": {"message": email("m2")}}))
     assert done.kind == "result" and "The exam moved to Friday." in done.message and "- Revise" in done.message
-    assert log == [{"role": "summarization", "provider": "openrouter", "model": "deepseek/deepseek-r1"}]
+    assert log == [{"role": "summarization", "provider": "openrouter", "model": "deepseek/deepseek-r1-0528"}]
     # no reference -> recent inbox mail, every match read before summarizing
     step = a.step(ctx("summarize_emails", {}))
     assert step.tool_calls[0].arguments["query"] == "in:inbox newer_than:7d"

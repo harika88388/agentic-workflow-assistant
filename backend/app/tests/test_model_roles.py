@@ -17,7 +17,7 @@ class Named(ScriptedLLM):
 
 def test_each_role_has_its_own_provider_and_model():
     s = settings(intent_llm_model="deepseek/deepseek-chat", summary_llm_provider="gemini",
-                 summary_llm_model="gemini-2.5-flash", task_llm_model="deepseek/deepseek-r1")
+                 summary_llm_model="gemini-2.5-flash", task_llm_model="deepseek/deepseek-r1-0528")
     r = LLMRouter(s)
     assert (r.config_for(LLMRole.INTENT).provider, r.config_for(LLMRole.INTENT).model) == ("openrouter", "deepseek/deepseek-chat")
     assert (r.config_for(LLMRole.SUMMARIZATION).provider, r.config_for(LLMRole.SUMMARIZATION).model) == ("gemini", "gemini-2.5-flash")

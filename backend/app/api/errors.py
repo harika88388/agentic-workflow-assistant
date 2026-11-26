@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 
 from app.integrations.errors import (
     GoogleAPIError, GoogleAuthError, GoogleBadRequestError, GoogleConflictError,
-    GoogleNotFoundError, GoogleRateLimitError,
+    GoogleNotFoundError, GoogleRateLimitError, GoogleServiceDisabledError,
 )
 from app.services.llm.base import LLMConfigError, LLMProviderError, LLMResponseError
 from app.services.token_service import TokenUnavailableError
@@ -27,6 +27,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             (GoogleConflictError, 409, "conflict"),
             (GoogleRateLimitError, 429, "google_rate_limited"),
             (GoogleBadRequestError, 400, "bad_request"),
+            (GoogleServiceDisabledError, 503, "service_disabled"),
         ]
         for cls, status, code in table:
             if isinstance(exc, cls):

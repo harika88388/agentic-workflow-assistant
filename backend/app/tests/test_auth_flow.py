@@ -4,8 +4,8 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import select
 
 from app.core.security import create_state_token, decrypt_secret
+from app.services import auth_service, google_oauth
 from app.database.models import OAuthCredential, User
-from app.services import google_oauth
 
 
 def _set_nonce(client, nonce):
@@ -25,6 +25,33 @@ def test_login_builds_google_url_with_offline_access(client):
     assert q["access_type"] == ["offline"] and q["response_type"] == ["code"]
     assert any("gmail" in s for s in q["scope"][0].split()) and any("calendar" in s for s in q["scope"][0].split())
     assert nonce
+
+
+def test_login_missing_google_credentials_is_safe(client, monkeypatch):
+    from app.api.routes import auth as auth_route
+
+    settings = auth_route.get_settings().model_copy(update={
+        "google_client_id": "",
+        "google_client_secret": "",
+        "google_redirect_uri": "",
+    })
+    monkeypatch.setattr(auth_route, "get_settings", lambda: settings)
+
+    r = client.get("/api/auth/google/login")
+    assert r.status_code == 302
+    assert "error=not_configured" in r.headers["location"]
+
+
+def test_login_redirect_is_google_and_contains_expected_query(client):
+    r = client.get("/api/auth/google/login")
+    assert r.status_code == 302
+    loc = r.headers["location"]
+    parsed = urlparse(loc)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "accounts.google.com"
+    query = parse_qs(parsed.query)
+    assert query["redirect_uri"] and query["client_id"]
+    assert set(query["scope"][0].split())
 
 
 def test_callback_success_creates_user_stores_encrypted_tokens(client, db_session, mock_google):
@@ -88,6 +115,57 @@ def test_callback_handles_user_denial_and_google_failure(client, monkeypatch):
     q, nonce = _start_login(client)
     _set_nonce(client, nonce)
     r = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]})
+    assert "error=oauth_failed" in r.headers["location"]
+
+
+def test_callback_missing_code_or_state_redirects_safely(client):
+    r = client.get("/api/auth/google/callback")
+    assert r.status_code == 302
+    assert "error=invalid_request" in r.headers["location"]
+
+
+def test_callback_identity_failure_redirects_safely(client, monkeypatch):
+    monkeypatch.setattr(
+        google_oauth,
+        "verify_id_token",
+        lambda token: (_ for _ in ()).throw(google_oauth.GoogleOAuthError("identity failed")),
+    )
+    q, nonce = _start_login(client)
+    _set_nonce(client, nonce)
+    r = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]})
+    assert r.status_code == 302
+    assert "error=oauth_failed" in r.headers["location"]
+
+
+def test_callback_database_persistence_failure_is_safe(client, monkeypatch):
+    def persist_failure(db, identity, tokens):
+        raise RuntimeError("database failure")
+
+    monkeypatch.setattr(auth_service, "upsert_user_with_credentials", persist_failure)
+    q, nonce = _start_login(client)
+    _set_nonce(client, nonce)
+    r = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]})
+    assert r.status_code == 302
+    assert "error=oauth_failed" in r.headers["location"]
+
+
+def test_callback_token_encryption_failure_is_safe(client, monkeypatch, mock_google):
+    monkeypatch.setattr(auth_service, "encrypt_secret", lambda secret: (_ for _ in ()).throw(RuntimeError("encryption failed")))
+    q, nonce = _start_login(client)
+    _set_nonce(client, nonce)
+    r = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]})
+    assert r.status_code == 302
+    assert "error=oauth_failed" in r.headers["location"]
+
+
+def test_callback_jwt_generation_failure_is_safe(client, monkeypatch, mock_google):
+    from app.api.routes import auth as auth_route
+
+    monkeypatch.setattr(auth_route, "create_access_token", lambda user_id: (_ for _ in ()).throw(RuntimeError("JWT failed")))
+    q, nonce = _start_login(client)
+    _set_nonce(client, nonce)
+    r = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]})
+    assert r.status_code == 302
     assert "error=oauth_failed" in r.headers["location"]
 
 

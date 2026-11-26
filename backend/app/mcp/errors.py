@@ -12,7 +12,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from app.integrations.calendar.service import CalendarError, CalendarVerificationError
 from app.integrations.errors import (
     GoogleAPIError, GoogleAuthError, GoogleBadRequestError, GoogleConflictError, GoogleNotFoundError,
-    GoogleRateLimitError,
+    GoogleRateLimitError, GoogleServiceDisabledError,
 )
 from app.integrations.gmail.service import GmailOperationError
 from app.services.token_service import TokenUnavailableError
@@ -57,6 +57,8 @@ def tool_errors() -> Iterator[None]:
         raise _fail("conflict", exc.message) from exc
     except GoogleRateLimitError as exc:
         raise _fail("google_rate_limited", "Google is rate-limiting requests; try again shortly.") from exc
+    except GoogleServiceDisabledError as exc:
+        raise _fail("google_api_not_enabled", exc.message) from exc
     except GoogleBadRequestError as exc:
         raise _fail("bad_request", exc.message) from exc
     except GoogleAPIError as exc:

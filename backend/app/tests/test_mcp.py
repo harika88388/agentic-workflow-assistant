@@ -157,3 +157,14 @@ def test_stdio_servers_run_as_subprocesses_and_bind_to_one_user(tmp_path):
             gw.call_tool("calendar", "list_events", {"days": 3})
         assert e.value.code == "google_reconnect_required"
     assert os.environ.get("MCP_USER_ID") is None  # the user id goes only to the child process
+
+
+def test_google_api_disabled_is_not_reported_as_reconnect_required():
+    from app.integrations.errors import GoogleServiceDisabledError
+    from app.mcp.errors import tool_errors
+
+    with pytest.raises(Exception) as exc:
+        with tool_errors():
+            raise GoogleServiceDisabledError("Gmail API is not enabled", 403, "accessNotConfigured")
+    assert "[google_api_not_enabled]" in str(exc.value)
+    assert "reconnect" not in str(exc.value).lower()

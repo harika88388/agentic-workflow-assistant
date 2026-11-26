@@ -85,8 +85,12 @@ def exchange_code(code: str) -> GoogleTokens:
             "grant_type": "authorization_code",
         },
     )
+    try:
+        access_token = body["access_token"]
+    except (KeyError, TypeError) as exc:
+        raise GoogleOAuthError("Google token response did not include access_token") from exc
     return GoogleTokens(
-        access_token=body["access_token"],
+        access_token=access_token,
         refresh_token=body.get("refresh_token"),
         expires_in=int(body.get("expires_in", 3600)),
         scope=body.get("scope", ""),
@@ -105,8 +109,12 @@ def refresh_access_token(refresh_token: str) -> GoogleTokens:
             "grant_type": "refresh_token",
         },
     )
+    try:
+        access_token = body["access_token"]
+    except (KeyError, TypeError) as exc:
+        raise GoogleOAuthError("Google refresh response did not include access_token") from exc
     return GoogleTokens(
-        access_token=body["access_token"],
+        access_token=access_token,
         refresh_token=body.get("refresh_token"),
         expires_in=int(body.get("expires_in", 3600)),
         scope=body.get("scope", ""),
@@ -126,8 +134,15 @@ def verify_id_token(raw_id_token: str | None) -> GoogleIdentity:
         raise GoogleOAuthError(f"invalid id_token: {exc}") from exc
     if not claims.get("email_verified"):
         raise GoogleOAuthError("Google account email is not verified")
+    try:
+        sub = claims["sub"]
+        email = claims["email"]
+    except (KeyError, TypeError) as exc:
+        raise GoogleOAuthError("Google identity response missing required claims") from exc
+    if not isinstance(email, str) or not email.strip():
+        raise GoogleOAuthError("Google identity response missing a valid email")
     return GoogleIdentity(
-        sub=claims["sub"], email=claims["email"].lower(), name=claims.get("name"), picture=claims.get("picture")
+        sub=sub, email=email.lower(), name=claims.get("name"), picture=claims.get("picture")
     )
 
 
