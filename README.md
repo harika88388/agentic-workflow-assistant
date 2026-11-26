@@ -1,170 +1,421 @@
 # Agentic Workflow Assistant
 
-A multi-agent assistant that turns natural-language requests into Gmail and Google Calendar actions
-(FastAPI · PostgreSQL · SQLAlchemy 2.0 · LangGraph · MCP · React).
+A FastAPI application that turns natural-language requests into safe, context-aware Gmail and Google Calendar workflows. Users sign in with Google, interact through a React workspace, and review sensitive email or calendar actions before the backend executes them.
 
-## Delivery plan (3 phases per batch)
+The project uses PostgreSQL for users, conversations, structured context, encrypted Google credentials, and workflow records. LangGraph orchestrates specialized agents; the official Python MCP SDK exposes Gmail and Calendar tools; and the existing LLM router selects OpenRouter/DeepSeek or Gemini models by responsibility.
 
-| Batch | Phases | Status |
-|---|---|---|
-| 1 | 1 Setup/architecture · 2 FastAPI + PostgreSQL · 3 Google OAuth + JWT | **Done, verified by you** |
-| 2 | 4 Gmail API · 5 Calendar API · 6 LLM router + intent recognition | **Done (this drop)** |
-| 3 | 7 Service selector + context enhancement · 8 Operation agents · 9 LangGraph | **Done** |
-| 4 | 10 MCP servers/client · 11 React frontend · 12 Tests, Docker, evaluation (200+ queries), docs | **Done** |
+## Key features
 
-## What exists after Phases 1-3
+### 1. Backend engineering
 
-- **Config**: validated settings (`app/core/config.py`); app refuses to start with a weak `JWT_SECRET` or invalid Fernet key.
-- **Database**: models for users, OAuth credentials, conversations, messages, session context and workflow executions,
-  with FKs, `ON DELETE CASCADE`, check constraints, unique constraints (incl. an idempotency key for duplicate-action
-  prevention, used from Phase 8). Alembic migration `0001`.
-- **Google OAuth 2.0 (Authorization Code, offline access)**: CSRF protection (signed `state` + httpOnly nonce cookie),
-  ID-token verification (signature, audience, `email_verified`), Gmail + Calendar scopes, user upsert.
-- **Token handling**: access/refresh tokens are Fernet-encrypted at rest and never sent to the browser. A token
-  service refreshes expiring tokens, keeps the old refresh token if Google omits a new one, and marks credentials
-  `revoked` on `invalid_grant`. Phases 4-5 will call `get_valid_access_token()`.
-- **JWT sessions**: short-lived app JWT delivered in the URL *fragment* after login; `type` claims stop state tokens
-  being used as sessions; `alg=none` is rejected.
-- **API** (`/api`): `GET /health`, `GET /health/ready`, `GET /auth/google/login`, `GET /auth/google/callback`,
-  `GET /auth/me` (profile + Gmail/Calendar connection status), `POST /auth/logout`,
-  `DELETE /auth/google/connection` (revoke + delete), and conversations `POST/GET/GET{id}/DELETE`
-  with strict per-user isolation (other users' IDs return 404).
+- FastAPI REST API with JWT authentication and request-scoped database sessions.
+- SQLAlchemy 2.0 models and PostgreSQL 16 support in Docker; PostgreSQL 18 was also connection-tested locally.
+- Alembic migrations, including the initial `0001` schema migration.
+- Pydantic validation, structured API errors, user ownership checks and readiness checks.
 
-## What Batch 2 adds (Phases 4-6)
+### 2. LangGraph agentic orchestration
 
-**Gmail (`app/integrations/gmail`)**: REST client (search, read, thread, send, draft), safe MIME building
-(header-injection and address-list rejection, UTF-8), reply threading (`threadId`, `In-Reply-To`, `References`,
-`Re:`), HTML-to-text fallback, attachment listing. `GmailService` re-checks every send/draft against Gmail
-(`SENT` label / draft exists / thread preserved) and reports `verified: false` rather than claiming success.
-Replies go to the message's `From`, never `Reply-To`, so an attacker cannot redirect a reply.
-All email content is returned with `untrusted: true`.
+The chat workflow uses LangGraph and includes:
 
-**Calendar (`app/integrations/calendar`)**: REST client (list, get, create, patch, delete, free/busy),
-time-zone-aware helpers (naive times are localized, DST gaps rejected), event **matching** that returns
-`unique` / `ambiguous` / `none` instead of guessing, and `CalendarService` that re-reads after every write.
-Creation is idempotent via a deterministic event id derived from an idempotency key. Cancellation is verified,
-and a failed verification raises an error instead of a success message.
+- Service Selector Agent
+- Intent Recognition Agent
+- Context Enhancement Agent
+- Specialized Gmail agents
+- Specialized Google Calendar agents
 
-**Retry policy (`integrations/http.py`)**: reads retry on 429/5xx/network errors; writes such as *send* retry
-only on 429 (request rejected), so a timeout can never produce a duplicate email.
+### 3. MCP integration
 
-**LLM layer (`app/services/llm`)**: OpenRouter (default: `deepseek/deepseek-r1`) and Gemini providers, a
-role-based `LLMRouter` (intent / summarization / task_automation, each overridable by env), structured output
-(strips R1 `<think>` blocks, extracts JSON, validates with Pydantic, feeds validation errors back to the model up
-to 3 attempts), and versioned prompt templates. `GET /api/llm/config` reports what is *actually* configured
-(`distinct_models` is 1 until you set overrides; nothing is simulated).
+- Official Python MCP SDK.
+- Separate Gmail and Google Calendar MCP servers.
+- MCP client-side tool discovery and invocation.
+- Configurable `stdio` subprocess transport or `inprocess` test transport.
+- Credentials are loaded in user-specific server scopes and are not sent as MCP tool arguments.
 
-**Intent Recognition Agent (`app/agents/intent_agent.py`)**: returns a validated `IntentResult`. Which
-parameters are missing is computed deterministically from the entities (not trusted from the LLM). A person's name
-is never accepted as an email address. If the model's output is unusable the agent asks the user to rephrase
-instead of guessing; provider outages are surfaced as errors, not masked.
+The Gmail server registers 6 tools: `search_emails`, `read_email`, `get_email_thread`, `send_email`, `reply_email`, and `create_draft`.
 
-### New endpoints
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/gmail/messages?q=` · `/messages/{id}` · `/threads/{id}` | read-only Gmail |
-| `GET /api/calendar/events?days=&q=` · `/next` · `/availability?start=&end=` | read-only Calendar |
-| `POST /api/intent/analyze` `{message, context?}` | classify a message; **performs no action** |
-| `GET /api/llm/config` | provider/model per role (no secrets) |
-| `PATCH /api/auth/me/timezone` `{timezone}` | IANA zone used to resolve dates |
-| `POST /api/workflows` · `GET /api/workflows` | Propose an approved Gmail/Calendar action and list executions |
-| `POST /api/workflows/{id}/decision` · `DELETE /api/workflows/{id}` | Approve/execute or reject an action |
+The Calendar server registers 6 tools: `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, and `check_availability`.
 
-Write operations are only reachable through the approval workflow. A proposal is stored as
-`awaiting_approval`; approval executes the verified Gmail/Calendar service and stores the result, while rejection
-stores `rejected`. The `idempotency_key` prevents duplicate proposals for the same user.
+### 4. Multi-model orchestration
 
-### Manual testing of Batch 2
-```bash
-TOKEN=...   # from the Google login flow (see Batch 1)
-H="Authorization: Bearer $TOKEN"
-curl -X PATCH -H "$H" -H 'Content-Type: application/json' -d '{"timezone":"Asia/Kolkata"}' localhost:8000/api/auth/me/timezone
-curl -H "$H" "localhost:8000/api/gmail/messages?q=is:unread&max_results=5"
-curl -H "$H" localhost:8000/api/calendar/next
-curl -H "$H" "localhost:8000/api/calendar/availability?start=2026-11-25T09:00&end=2026-11-25T18:00"
-curl -H "$H" localhost:8000/api/llm/config
-# needs OPENROUTER_API_KEY in .env (R1 can take 10-60 s):
-curl -X POST -H "$H" -H 'Content-Type: application/json' \
-     -d '{"message":"Move my meeting with Rahul to Friday at 3 PM"}' localhost:8000/api/intent/analyze
-curl -X POST -H "$H" -H 'Content-Type: application/json' \
-     -d '{"message":"Send an email to Professor saying I will miss class"}' localhost:8000/api/intent/analyze
-#   -> missing_parameters ["recipient_email"], requires_clarification true
+The existing `LLMRouter` supports:
+
+- OpenRouter / DeepSeek.
+- Gemini.
+- Intent recognition.
+- Summarization.
+- Task automation.
+
+Provider and model selection is configurable globally or independently for each responsibility.
+
+### 5. Google integrations
+
+- Google OAuth 2.0 Authorization Code flow.
+- Gmail search, read, thread, send, reply and draft operations.
+- Calendar listing, retrieval, creation, rescheduling, cancellation and availability operations.
+- Fernet-encrypted access and refresh tokens at rest.
+- User-specific Google credential lookup and refresh handling.
+
+### 6. Context-aware automation
+
+Conversations, messages and session context are persisted in PostgreSQL. The workflow can continue pending requests, resolve references such as "him", "it", and "that meeting", retain candidate selections, detect missing parameters and ask clarifying questions. It does not use RAG or a vector database.
+
+## System architecture
+
+```mermaid
+flowchart TD
+    U[React user workspace] -->|POST /api/conversations/:id/messages| API[FastAPI]
+    API --> C[Load conversation context]
+    C --> S[Service Selector Agent]
+    S --> I[Intent Recognition Agent]
+    I --> X[Context Enhancement Agent]
+    X --> V[Missing parameter detection]
+    V -->|clarification| R[Response generation]
+    V -->|Gmail operation| G[Specialized Gmail agent]
+    V -->|Calendar operation| CA[Specialized Calendar agent]
+    G -->|read operation| MCP[MCP client]
+    CA -->|read operation| MCP
+    G -->|sensitive write proposal| A[Approval workflow]
+    CA -->|sensitive write proposal| A
+    MCP --> GS[Gmail MCP server]
+    MCP --> CS[Calendar MCP server]
+    GS --> GA[Gmail API]
+    CS --> CV[Google Calendar API]
+    GA --> GS
+    CV --> CS
+    GS --> MCP
+    CS --> MCP
+    MCP --> G
+    MCP --> CA
+    G --> R
+    CA --> R
+    R --> P[PostgreSQL persistence]
+    A -->|approved| MCP
+    A -->|rejected| R
 ```
-Using Gemini instead: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=...` **and** set `LLM_MODEL` to a current Gemini model
-name (the default model name is for OpenRouter).
 
-## Setup
+The conceptual route is implemented by `app/workflows/graph.py` with LangGraph nodes. Read-only Gmail and Calendar operations can execute during a chat turn. Send, reply, draft, create, reschedule and cancel operations create an `awaiting_approval` workflow and execute only after an explicit decision.
 
-### 1. Environment
-```bash
+## Agent architecture
+
+- **Service Selector Agent**: uses deterministic service signals and pending-conversation context to choose Gmail or Calendar, then reconciles that choice with the recognized intent.
+- **Intent Recognition Agent**: uses the LLM router and validated JSON output to identify operations and entities. Missing parameters are enforced deterministically rather than trusted from model output.
+- **Context Enhancement Agent**: merges the latest conversation history, session memory and pending entities. It resolves pronouns, candidate selections and relative dates within the user's timezone.
+- **Gmail agents**: search, read, reply and summarize emails, and propose sending, replying or creating drafts.
+- **Calendar agents**: list events, check availability, create events, locate events safely and propose rescheduling or cancellation.
+- **LangGraph orchestrator**: controls context loading, routing, agent iterations, MCP calls, approval proposals, response generation and PostgreSQL persistence.
+
+## MCP architecture
+
+MCP servers are implemented with the official Python MCP SDK in `backend/app/mcp/`.
+
+- `gmail_server.py` exposes Gmail operations.
+- `calendar_server.py` exposes Calendar operations.
+- `client.py` provides discovery and invocation through `MCPGateway`.
+- `executors.py` adapts approved workflow actions to MCP tool calls.
+- `runtime.py` binds stdio servers to a specific user through `MCP_USER_ID`.
+
+The default `MCP_TRANSPORT=stdio` starts a server subprocess for each Gmail or Calendar connection. `MCP_TRANSPORT=inprocess` is available for tests and single-process deployments. MCP sessions discover tools with `tools/list` and reject calls to tools the server did not advertise.
+
+## Multi-model architecture
+
+`backend/app/services/llm/router.py` defines three model roles:
+
+| Role | Default responsibility | Environment override |
+|---|---|---|
+| Intent | Intent and entity recognition | `INTENT_LLM_PROVIDER`, `INTENT_LLM_MODEL` |
+| Summarization | Gmail summarization | `SUMMARY_LLM_PROVIDER`, `SUMMARY_LLM_MODEL` |
+| Task automation | Email composition | `TASK_LLM_PROVIDER`, `TASK_LLM_MODEL` |
+
+The global provider is `LLM_PROVIDER` and the global model is `LLM_MODEL`. Provider/model overrides may be set independently when the override differs consistently from the global provider configuration.
+
+## Gmail and Calendar integrations
+
+Google OAuth requests the following scopes:
+
+- `openid`
+- `https://www.googleapis.com/auth/userinfo.email`
+- `https://www.googleapis.com/auth/userinfo.profile`
+- `https://www.googleapis.com/auth/gmail.modify`
+- `https://www.googleapis.com/auth/calendar`
+
+OAuth state is signed and matched against an HTTP-only nonce cookie. The application JWT is returned in the browser URL fragment after callback and is not sent to the server in that redirect request. Google access and refresh tokens are Fernet-encrypted in PostgreSQL and refreshed through the token service.
+
+Gmail and Calendar REST clients use user-bound credentials. Write operations are not exposed as direct chat execution: they enter the approval workflow first.
+
+## Conversation and context management
+
+Conversation tables persist user-owned conversations and messages. `SessionContext` stores structured memory and pending request state for the conversation.
+
+Context enhancement can:
+
+- Continue a partially answered request.
+- Resolve remembered recipient addresses and event candidates.
+- Resolve relative dates in the user's IANA timezone.
+- Request clarification for missing parameters or ambiguous event references.
+- Store the final result and update memory after workflow approval decisions.
+
+## Approval workflow
+
+Approval is required for:
+
+- Sending email.
+- Replying to email.
+- Creating drafts.
+- Creating calendar events.
+- Rescheduling calendar events.
+- Cancelling calendar events.
+
+A proposal is stored with status `awaiting_approval`. Approving it executes the operation through the corresponding MCP server. Rejecting it sets status `rejected` and executes no external write. Results, failures and rejection state are persisted in `WorkflowExecution` and appended to conversation messages. Idempotency keys prevent duplicate workflow proposals and Calendar creation uses workflow identity for idempotent event creation.
+
+## Technology stack
+
+- Python 3.12+ and FastAPI.
+- PostgreSQL.
+- SQLAlchemy 2.0 and Alembic.
+- Pydantic 2 and Pydantic Settings.
+- LangGraph.
+- Official Python MCP SDK.
+- Google OAuth, Gmail and Google Calendar APIs.
+- OpenRouter with DeepSeek and Google Gemini providers.
+- React, Vite and Lucide in the existing frontend.
+- Docker Compose for local PostgreSQL, backend and frontend services.
+
+## Installation and setup
+
+### Prerequisites
+
+- Python 3.12 or newer.
+- PostgreSQL 16 or a compatible PostgreSQL installation.
+- Node.js and npm for the React frontend.
+- Docker Desktop only if using Docker Compose.
+- Google OAuth credentials for live Google operations.
+- An OpenRouter or Gemini API key for live model calls.
+
+### Project structure
+
+```text
+backend/       FastAPI application, database, agents, MCP, integrations and tests
+frontend/      React and Vite client
+docker-compose.yml
+```
+
+### Windows PowerShell: backend environment
+
+```powershell
+cd c:\path\to\agentic-workflow-assistant
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+```
+
+### PostgreSQL
+
+Docker Compose includes PostgreSQL 16:
+
+```powershell
+cd c:\path\to\agentic-workflow-assistant
+docker compose up -d db
+```
+
+Alternatively, configure a local PostgreSQL instance in `DATABASE_URL`. The default development URL is:
+
+```text
+postgresql+psycopg://assistant:assistant@localhost:5432/assistant
+```
+
+Only run migrations against a database you own and intend to use for development.
+
+```powershell
 cd backend
-cp .env.example .env
-python -c "import secrets; print(secrets.token_urlsafe(48))"                       # -> JWT_SECRET
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # -> TOKEN_ENCRYPTION_KEY
+..\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
-### 2. Google OAuth
-1. [Google Cloud Console](https://console.cloud.google.com) → create/select a project.
-2. **APIs & Services → Library**: enable **Gmail API** and **Google Calendar API**.
-3. **OAuth consent screen**: External (or Internal), add yourself as a test user, add scopes
-   `openid`, `email`, `profile`, `.../auth/gmail.modify`, `.../auth/calendar`.
-   (Gmail/Calendar scopes are *sensitive/restricted*: while in "Testing" mode, refresh tokens expire after 7 days.)
-4. **Credentials → Create OAuth client ID → Web application**; authorized redirect URI:
-   `http://localhost:8000/api/auth/google/callback`.
-5. Put the client ID/secret into `.env`.
+### Environment configuration
 
-### 3. Database
-```bash
-docker compose up -d db                 # PostgreSQL 16
-cd backend && python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-alembic upgrade head
+From the repository root:
+
+```powershell
+Copy-Item backend\.env.example backend\.env
 ```
 
-### 4. Run
-```bash
-uvicorn app.main:app --reload            # http://localhost:8000/docs
-```
-Try the flow by opening `http://localhost:8000/api/auth/google/login` in a browser; you are redirected to
-`FRONTEND_URL/auth/callback#token=...` (the React app arrives in Phase 11; until then copy the token and use it as
-`Authorization: Bearer <token>` against `/api/auth/me`).
+Generate secrets without placing them in documentation:
 
-### Docker (backend + db)
-```bash
-cp backend/.env.example backend/.env   # fill in secrets
-docker compose up --build              # runs migrations, then serves on :8000
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Compose now starts the React client at `http://localhost:5173` after the backend readiness check passes.
-The first login requires Google OAuth credentials and the authorized callback URI shown above. If an older
-`pgdata` volume was created with different PostgreSQL credentials, recreate it once with
-`docker compose down -v` followed by `docker compose up --build` (this deletes only the Compose database volume).
+Fill in `backend/.env` only with your own values. Never commit it.
 
-### Tests
-```bash
-cd backend && pytest -v
+### Google OAuth configuration
+
+1. Create or select a Google Cloud project.
+2. Enable Gmail API and Google Calendar API.
+3. Configure an OAuth web client.
+4. Add `http://localhost:8000/api/auth/google/callback` as an authorized redirect URI.
+5. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `backend/.env`.
+
+Start the backend and open `http://localhost:8000/api/auth/google/login` to begin consent.
+
+### Run the backend
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
-Tests use in-memory SQLite and mocked Google calls; no credentials needed.
 
-## Test status
+API documentation: `http://localhost:8000/docs`
 
-The complete backend suite runs locally with the project virtual environment:
+Health endpoints:
 
-| Suite | Tests | Status |
+- `GET http://localhost:8000/api/health`
+- `GET http://localhost:8000/api/health/ready`
+
+### Run the frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend expects `VITE_API_URL=http://localhost:8000/api` by default.
+
+### Docker Compose
+
+```powershell
+Copy-Item backend\.env.example backend\.env
+# Set secrets and optional Google/LLM credentials in backend/.env
+docker compose up --build
+```
+
+Docker Compose serves the frontend on `http://localhost:5173` and the backend on `http://localhost:8000`.
+
+## Environment variables
+
+| Variable | Required | Purpose |
 |---|---|---|
-| `test_validation`, `test_mime`, `test_timeutil`, `test_matching`, `test_jsonutil` (stdlib only) | 32 | **executed here: all pass** |
-| `test_gmail_service`, `test_calendar_service` (fake clients, `httpx` stubbed) | 21 | **executed here: all pass** |
-| Complete `backend/app/tests` suite | 207 | **pass** |
-| Frontend production build (`npm run build`) | | **pass** |
-| Compose configuration (`docker compose config`) | | **pass** |
+| `APP_ENV` | No | Application environment; defaults to `development`. |
+| `DATABASE_URL` | Yes for real PostgreSQL | SQLAlchemy PostgreSQL connection string. |
+| `JWT_SECRET` | Yes | JWT signing secret; at least 32 characters. |
+| `JWT_ALGORITHM` | No | JWT algorithm; defaults to `HS256`. |
+| `JWT_EXPIRE_MINUTES` | No | Application JWT lifetime; defaults to `480`. |
+| `TOKEN_ENCRYPTION_KEY` | Yes | Valid Fernet key for Google credential encryption. |
+| `GOOGLE_CLIENT_ID` | Live OAuth | Google OAuth web client ID. |
+| `GOOGLE_CLIENT_SECRET` | Live OAuth | Google OAuth web client secret. |
+| `GOOGLE_REDIRECT_URI` | No | OAuth callback URL. |
+| `FRONTEND_URL` | No | Frontend URL used after OAuth callbacks. |
+| `CORS_ORIGINS` | No | Comma-separated allowed frontend origins. |
+| `OPENROUTER_API_KEY` | Live OpenRouter | OpenRouter authentication. |
+| `OPENROUTER_BASE_URL` | No | OpenRouter API base URL. |
+| `OPENROUTER_JSON_MODE` | No | Enables JSON-mode preference where supported. |
+| `GEMINI_API_KEY` | Live Gemini | Gemini authentication. |
+| `GEMINI_BASE_URL` | No | Gemini API base URL. |
+| `LLM_PROVIDER` | No | Default provider: `openrouter` or `gemini`. |
+| `LLM_MODEL` | No | Default model name. |
+| `INTENT_LLM_PROVIDER` / `INTENT_LLM_MODEL` | No | Intent-role provider and model override. |
+| `SUMMARY_LLM_PROVIDER` / `SUMMARY_LLM_MODEL` | No | Summarization-role provider and model override. |
+| `TASK_LLM_PROVIDER` / `TASK_LLM_MODEL` | No | Task-role provider and model override. |
+| `LLM_TIMEOUT_SECONDS` | No | Provider HTTP timeout. |
+| `LLM_MAX_RETRIES` | No | Provider retry count after the initial request. |
+| `LLM_MAX_TOKENS` | No | Maximum provider response tokens. |
+| `MCP_TRANSPORT` | No | `stdio` or `inprocess`; defaults to `stdio`. |
+| `MCP_TIMEOUT_SECONDS` | No | MCP tool-call timeout. |
 
-The repository includes an offline evaluation harness in `app/evaluation/evaluator.py` with a 200-query deterministic
-intent dataset. Live Gmail, Calendar, and LLM accuracy require real credentials and should be measured before
-reporting a production accuracy figure.
+## API routes
 
-## Known limitations (so far)
-- Sessions are stateless JWTs: logout is client-side and a token stays valid until expiry (default 8 h).
-- Sync SQLAlchemy/httpx is used deliberately (simple, adequate for this workload).
-- Calendar listing reads one page (max 250 events in the window); all-day events cannot be rescheduled yet.
-- DeepSeek R1 can be slow and its reasoning tokens count against `LLM_MAX_TOKENS`; raise it if you see an empty-content response.
-- Real Google OAuth, Gmail, Calendar, PostgreSQL, and provider calls require credentials and a running database.
+All routes below are under `/api` unless shown otherwise.
+
+### Authentication
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/auth/google/login` | Start Google OAuth. |
+| `GET` | `/api/auth/google/callback` | Complete Google OAuth callback. |
+| `GET` | `/api/auth/me` | Return profile and Gmail/Calendar connection status. |
+| `POST` | `/api/auth/logout` | Discard the client-side JWT session. |
+| `DELETE` | `/api/auth/google/connection` | Revoke and remove Google credentials. |
+| `PATCH` | `/api/auth/me/timezone` | Update the user's IANA timezone. |
+
+### Conversations and chat
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/conversations` | Create a conversation. |
+| `GET` | `/api/conversations` | List owned conversations. |
+| `GET` | `/api/conversations/{id}` | Retrieve an owned conversation and messages. |
+| `DELETE` | `/api/conversations/{id}` | Delete an owned conversation. |
+| `POST` | `/api/conversations/{id}/messages` | Run a conversation turn through LangGraph and MCP. |
+
+### Workflows
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/workflows` | Create an approval workflow proposal. |
+| `GET` | `/api/workflows` | List owned workflows. |
+| `GET` | `/api/workflows/{id}` | Retrieve an owned workflow. |
+| `POST` | `/api/workflows/{id}/decision` | Approve or reject with `{"approve": true|false}`. |
+| `DELETE` | `/api/workflows/{id}` | Reject a pending workflow. |
+
+### Read-only Gmail and Calendar
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/gmail/messages?q=...` | Search Gmail messages. |
+| `GET` | `/api/gmail/messages/{id}` | Read a Gmail message. |
+| `GET` | `/api/gmail/threads/{id}` | Read a Gmail thread. |
+| `GET` | `/api/calendar/events?days=7&q=...` | List Calendar events. |
+| `GET` | `/api/calendar/next` | Return the next event. |
+| `GET` | `/api/calendar/availability?start=...&end=...` | Check Calendar availability. |
+
+### Intent and MCP
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/intent/analyze` | Classify a message without performing an action. |
+| `GET` | `/api/llm/config` | Show provider/model routing without secrets. |
+| `GET` | `/api/mcp/tools` | Discover tools registered by the Gmail and Calendar MCP servers. |
+| `GET` | `/api/health` | Liveness check. |
+| `GET` | `/api/health/ready` | PostgreSQL readiness check. |
+
+## Testing
+
+Run the complete backend suite from the repository root:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m pytest -q --tb=line
+```
+
+Python syntax verification:
+
+```powershell
+..\.venv\Scripts\python.exe -m compileall -q app
+```
+
+The suite uses isolated SQLite fixtures and mocked Google/LLM behavior for external integrations. It tests LangGraph, context handling, MCP protocol behavior, approval gates, provider abstractions and ordinary backend functionality.
+
+Build the frontend:
+
+```powershell
+cd frontend
+npm run build
+```
+
+No frontend test script is currently defined in `package.json`.
+
+## Known integration limitations
+
+- PostgreSQL 18 connection and a harmless `SELECT 1` were verified locally. PostgreSQL is not treated as live-tested unless a real application database is used.
+- Alembic reports migration `0001 (head)`; no migration was applied against an unknown existing database.
+- Google OAuth, Gmail and Calendar live verification requires real Google OAuth credentials and an authorized account.
+- OpenRouter/DeepSeek and Gemini live calls require API keys.
+- Existing integration tests are mocked and must not be described as live external verification.
+- Safe read operations can be tested when credentials are available; send, reply, draft, create, reschedule and cancel operations remain approval-gated and were not to be exercised externally.
+
+## Known application limitations
+
+- Logout is client-side because application sessions are stateless JWTs.
+- Calendar listing is subject to configured look-ahead and result limits.
+- All-day Calendar events cannot be rescheduled through the existing specialized agent.
+- Live external integration accuracy depends on credentials and provider availability.
