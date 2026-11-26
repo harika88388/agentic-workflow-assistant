@@ -63,3 +63,13 @@ def user_zone(user: User) -> ZoneInfo:
 def get_calendar_service(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CalendarService:
     _require(db, user, "calendar")
     return CalendarService(CalendarClient(lambda: get_valid_access_token(db, user.id)), user_zone(user))
+
+
+# ---------- MCP ----------
+def get_mcp_gateway_factory():
+    """Returns `(db, user) -> MCPGateway` bound to that user's credentials (overridable in tests)."""
+    from app.core.config import get_settings
+    from app.mcp.client import gateway_for_user
+
+    settings = get_settings()
+    return lambda db, user: gateway_for_user(db, user.id, settings)

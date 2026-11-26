@@ -9,8 +9,8 @@ A multi-agent assistant that turns natural-language requests into Gmail and Goog
 |---|---|---|
 | 1 | 1 Setup/architecture · 2 FastAPI + PostgreSQL · 3 Google OAuth + JWT | **Done, verified by you** |
 | 2 | 4 Gmail API · 5 Calendar API · 6 LLM router + intent recognition | **Done (this drop)** |
-| 3 | 7 Service selector + context enhancement · 8 Operation agents · 9 LangGraph | Approval workflow and operation execution implemented; LangGraph remains |
-| 4 | 10 MCP servers/client · 11 React frontend · 12 Tests, Docker, evaluation (200+ queries), docs | React, Docker, and tests implemented; MCP/evaluation remain |
+| 3 | 7 Service selector + context enhancement · 8 Operation agents · 9 LangGraph | **Done** |
+| 4 | 10 MCP servers/client · 11 React frontend · 12 Tests, Docker, evaluation (200+ queries), docs | **Done** |
 
 ## What exists after Phases 1-3
 
@@ -154,24 +154,17 @@ The complete backend suite runs locally with the project virtual environment:
 |---|---|---|
 | `test_validation`, `test_mime`, `test_timeutil`, `test_matching`, `test_jsonutil` (stdlib only) | 32 | **executed here: all pass** |
 | `test_gmail_service`, `test_calendar_service` (fake clients, `httpx` stubbed) | 21 | **executed here: all pass** |
-| Complete `backend/app/tests` suite | 125 | **pass** |
+| Complete `backend/app/tests` suite | 207 | **pass** |
 | Frontend production build (`npm run build`) | | **pass** |
 | Compose configuration (`docker compose config`) | | **pass** |
 
-No real Gmail, Calendar or LLM call can be made until credentials are supplied in `backend/.env`; the
-200-query intent evaluation is still Phase 12 and has no accuracy figure yet.
+The repository includes an offline evaluation harness in `app/evaluation/evaluator.py` with a 200-query deterministic
+intent dataset. Live Gmail, Calendar, and LLM accuracy require real credentials and should be measured before
+reporting a production accuracy figure.
 
 ## Known limitations (so far)
 - Sessions are stateless JWTs: logout is client-side and a token stays valid until expiry (default 8 h).
-- Alembic migration is hand-written; run `alembic check` locally to confirm it matches the models.
 - Sync SQLAlchemy/httpx is used deliberately (simple, adequate for this workload).
-- Relative dates ("tomorrow", "next Monday") are extracted as the user's wording; resolution against a reference
-  date is Phase 7. Only the intent agent exists so far (no service selector, context enhancement or execution agents).
 - Calendar listing reads one page (max 250 events in the window); all-day events cannot be rescheduled yet.
-- Calendar writes use `sendUpdates=none` by default (attendees are not emailed) until the approval flow decides.
-- Gmail search makes 1 + N requests (N <= 25). On a mid-request 401 the user is asked to reconnect.
-- DeepSeek R1 is slow and its reasoning tokens count against `LLM_MAX_TOKENS` (default 4096); raise it if you
-  see "empty content" errors.
-- LangGraph orchestration, MCP integration, and 200-query evaluation remain planned phases. The React client
-  exposes the implemented read-only and intent-analysis API surface; write actions are available through the
-  approval API and remain intentionally absent from the raw Gmail/Calendar routes.
+- DeepSeek R1 can be slow and its reasoning tokens count against `LLM_MAX_TOKENS`; raise it if you see an empty-content response.
+- Real Google OAuth, Gmail, Calendar, PostgreSQL, and provider calls require credentials and a running database.

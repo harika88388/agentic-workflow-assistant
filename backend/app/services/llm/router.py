@@ -46,9 +46,16 @@ class LLMRouter:
 
     def describe(self) -> dict:
         """What is configured for each role (no secrets). `distinct_models` reflects reality, not aspiration."""
-        roles = {r.value: {"provider": c.provider, "model": c.model, "source": "override" if c.overridden else "default"}
+        keys = {"openrouter": bool(self._s.openrouter_api_key), "gemini": bool(self._s.gemini_api_key)}
+        roles = {r.value: {"provider": c.provider, "model": c.model, "source": "override" if c.overridden else "default",
+                           "provider_ready": keys.get(c.provider, False) or c.provider in self._providers}
                  for r in LLMRole for c in [self.config_for(r)]}
         return {"roles": roles, "distinct_models": len({(v["provider"], v["model"]) for v in roles.values()})}
+
+    def call_record(self, role: LLMRole) -> dict:
+        """Which provider/model actually serves `role`, for execution traces."""
+        cfg = self.config_for(role)
+        return {"role": role.value, "provider": cfg.provider, "model": cfg.model}
 
     def _provider(self, name: str) -> LLMProvider:
         if name not in self._providers:

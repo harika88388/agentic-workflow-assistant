@@ -42,34 +42,203 @@ function Dashboard({ token, onLogout }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("intent");
+  const [selectedConversation, setSelectedConversation] = useState(null);
 
   async function load() {
-    try { setError(""); const [profile, items] = await Promise.all([request("/auth/me", {}, token), request("/conversations", {}, token)]); setMe(profile); setConversations(items); }
-    catch (err) { setError(err.message); }
+    try {
+      setError("");
+      const [profile, items] = await Promise.all([
+        request("/auth/me", {}, token),
+        request("/conversations", {}, token),
+      ]);
+      setMe(profile);
+      setConversations(items);
+      if (items.length) setSelectedConversation(items[0].id);
+    } catch (err) {
+      setError(err.message);
+    }
   }
+
   useEffect(() => { load(); }, []);
 
+  async function ensureConversation() {
+    if (selectedConversation) return selectedConversation;
+    const item = await request("/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: "New workspace" }),
+    }, token);
+    setConversations((items) => [item, ...items]);
+    setSelectedConversation(item.id);
+    return item.id;
+  }
+
   async function analyze(event) {
-    event.preventDefault(); if (!prompt.trim()) return;
-    setBusy(true); setError(""); setResult(null);
-    try { setResult(await request("/intent/analyze", { method: "POST", body: JSON.stringify({ message: prompt }) }, token)); }
-    catch (err) { setError(err.message); } finally { setBusy(false); }
+    event.preventDefault();
+    if (!prompt.trim()) return;
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      const conversationId = await ensureConversation();
+      const turn = await request(`/conversations/${conversationId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content: prompt }),
+      }, token);
+      setResult(turn);
+      setPrompt("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
   }
+
+  async function decideWorkflow(approve) {
+    if (!result?.workflow?.id) return;
+    setBusy(true);
+    setError("");
+    try {
+      const workflow = await request(`/workflows/${result.workflow.id}/decision`, {
+        method: "POST",
+        body: JSON.stringify({ approve }),
+      }, token);
+      setResult({
+        status: workflow.status,
+        workflow,
+        assistant_message: {
+          content: approve
+            ? `Approved. Workflow status: ${workflow.status}.`
+            : "Action rejected.",
+        },
+      });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createConversation() {
-    try { const item = await request("/conversations", { method: "POST", body: JSON.stringify({ title: "New workspace" }) }, token); setConversations([item, ...conversations]); }
-    catch (err) { setError(err.message); }
+    try {
+      const item = await request("/conversations", {
+        method: "POST",
+        body: JSON.stringify({ title: "New workspace" }),
+      }, token);
+      setConversations((items) => [item, ...items]);
+      setSelectedConversation(item.id);
+    } catch (err) {
+      setError(err.message);
+    }
   }
-  if (!me) return <div className="center-state"><RefreshCw className="spin" size={22} /> Loading your workspace...</div>;
+
+  if (!me) {
+    return <div className="center-state"><RefreshCw className="spin" size={22} /> Loading your workspace...</div>;
+  }
+
   const { user, connections } = me;
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Sparkles size={18} /></div><span>Orbit Desk</span></div><div className="side-label">Workspace</div><button className={`nav-item ${tab === "intent" ? "active" : ""}`} onClick={() => setTab("intent")}><MessageSquare size={17} /> Intent desk<ChevronRight size={15} /></button><button className={`nav-item ${tab === "mail" ? "active" : ""}`} onClick={() => setTab("mail")}><Mail size={17} /> Gmail<ChevronRight size={15} /></button><button className={`nav-item ${tab === "calendar" ? "active" : ""}`} onClick={() => setTab("calendar")}><CalendarDays size={17} /> Calendar<ChevronRight size={15} /></button><div className="side-bottom"><div className="avatar">{(user.name || user.email)[0].toUpperCase()}</div><div className="profile"><strong>{user.name || "Connected user"}</strong><span>{user.email}</span></div><button className="icon-button" title="Sign out" onClick={onLogout}><LogIn size={16} /></button></div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">TUESDAY, NOVEMBER 24</p><h2>Good to see you{user.name ? `, ${user.name.split(" ")[0]}` : ""}.</h2></div><div className="connections"><StatusPill connected={connections.gmail} label="Gmail" /><StatusPill connected={connections.calendar} label="Calendar" /></div></header>{error && <div className="notice error"><XCircle size={17} /> {error}</div>}{tab === "intent" && <section className="content-grid"><div className="hero-card"><div className="card-kicker"><Sparkles size={16} /> Intent desk</div><h1>What should we<br /><em>untangle</em> today?</h1><p className="muted">Describe a Gmail or Calendar task in plain language. Orbit will classify it and show what it needs before anything acts.</p><form onSubmit={analyze} className="prompt-box"><textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Try: Move my meeting with Rahul to Friday at 3 PM" maxLength={2000} /><div className="prompt-footer"><span>{prompt.length} / 2000</span><button className="send-button" disabled={busy || !prompt.trim()}>{busy ? <RefreshCw className="spin" size={17} /> : <Send size={17} />} Analyze request</button></div></form>{result && <div className="result"><div className="result-top"><span className="result-label">CLASSIFICATION</span><span className={`confidence ${result.requires_clarification ? "warn" : ""}`}>{result.requires_clarification ? "Needs clarification" : "Ready for review"}</span></div><h3>{result.intent || "Unclear request"}</h3>{result.clarification_question && <p>{result.clarification_question}</p>}<div className="chips">{(result.missing_parameters || []).map((item) => <span key={item}>{item.replaceAll("_", " ")}</span>)}</div></div>}</div><div className="rail"><div className="rail-section"><div className="section-heading"><span>Recent spaces</span><button className="text-button" onClick={createConversation}>+ New</button></div>{conversations.length === 0 ? <p className="muted small">No spaces yet. Create one to keep a thread of work together.</p> : conversations.slice(0, 5).map((item) => <div className="conversation" key={item.id}><MessageSquare size={16} /><span>{item.title}</span><ChevronRight size={14} /></div>)}</div><div className="rail-section status-card"><div className="section-heading"><span>System status</span><CheckCircle2 size={17} /></div><p>API is connected and ready for authenticated requests.</p></div></div></section>}{tab !== "intent" && <section className="empty-view"><div className="empty-icon">{tab === "mail" ? <Mail size={28} /> : <CalendarDays size={28} />}</div><h1>{tab === "mail" ? "Gmail" : "Calendar"} is connected.</h1><p className="muted">Read-only integration views are available through the API. Action workflows will arrive with the approval phase.</p><a className="secondary-button" href="http://localhost:8000/docs" target="_blank" rel="noreferrer">Open API workspace <ChevronRight size={16} /></a></section>}</main></div>;
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand"><div className="brand-mark"><Sparkles size={18} /></div><span>Orbit Desk</span></div>
+        <div className="side-label">Workspace</div>
+        <button className={`nav-item ${tab === "intent" ? "active" : ""}`} onClick={() => setTab("intent")}><MessageSquare size={17} /> Intent desk<ChevronRight size={15} /></button>
+        <button className={`nav-item ${tab === "mail" ? "active" : ""}`} onClick={() => setTab("mail")}><Mail size={17} /> Gmail<ChevronRight size={15} /></button>
+        <button className={`nav-item ${tab === "calendar" ? "active" : ""}`} onClick={() => setTab("calendar")}><CalendarDays size={17} /> Calendar<ChevronRight size={15} /></button>
+        <div className="side-bottom">
+          <div className="avatar">{(user.name || user.email)[0].toUpperCase()}</div>
+          <div className="profile"><strong>{user.name || "Connected user"}</strong><span>{user.email}</span></div>
+          <button className="icon-button" title="Sign out" onClick={onLogout}><LogIn size={16} /></button>
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <div><p className="eyebrow">WORKSPACE</p><h2>Good to see you{user.name ? `, ${user.name.split(" ")[0]}` : ""}.</h2></div>
+          <div className="connections"><StatusPill connected={connections.gmail} label="Gmail" /><StatusPill connected={connections.calendar} label="Calendar" /></div>
+        </header>
+
+        {error && <div className="notice error"><XCircle size={17} /> {error}</div>}
+
+        {tab === "intent" && (
+          <section className="content-grid">
+            <div className="hero-card">
+              <div className="card-kicker"><Sparkles size={16} /> Agent desk</div>
+              <h1>What should we<br /><em>untangle</em> today?</h1>
+              <p className="muted">Describe a Gmail or Calendar task in plain language. The LangGraph workflow will clarify, retrieve, propose, or report an error before acting.</p>
+              <form onSubmit={analyze} className="prompt-box">
+                <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Try: Move my meeting with Rahul to Friday at 3 PM" maxLength={2000} />
+                <div className="prompt-footer">
+                  <span>{prompt.length} / 2000</span>
+                  <button className="send-button" disabled={busy || !prompt.trim()}>{busy ? <RefreshCw className="spin" size={17} /> : <Send size={17} />} Run workflow</button>
+                </div>
+              </form>
+
+              {result && (
+                <div className="result">
+                  <div className="result-top">
+                    <span className="result-label">WORKFLOW RESPONSE</span>
+                    <span className={`confidence ${result.status === "needs_clarification" ? "warn" : ""}`}>{result.status}</span>
+                  </div>
+                  <p>{result.assistant_message?.content}</p>
+                  {result.status === "awaiting_approval" && result.workflow?.id && (
+                    <div className="approval-actions">
+                      <button type="button" className="send-button" disabled={busy} onClick={() => decideWorkflow(true)}>Approve</button>
+                      <button type="button" className="secondary-button" disabled={busy} onClick={() => decideWorkflow(false)}>Reject</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="rail">
+              <div className="rail-section">
+                <div className="section-heading"><span>Recent spaces</span><button className="text-button" onClick={createConversation}>+ New</button></div>
+                {conversations.length === 0 ? (
+                  <p className="muted small">No spaces yet. Send a request to create one.</p>
+                ) : conversations.slice(0, 5).map((item) => (
+                  <button className={`conversation ${selectedConversation === item.id ? "active" : ""}`} key={item.id} onClick={() => setSelectedConversation(item.id)}><MessageSquare size={16} /><span>{item.title}</span><ChevronRight size={14} /></button>
+                ))}
+              </div>
+              <div className="rail-section status-card">
+                <div className="section-heading"><span>System status</span><CheckCircle2 size={17} /></div>
+                <p>Chat, MCP tools, and approval workflows are enabled.</p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {tab !== "intent" && (
+          <section className="empty-view">
+            <div className="empty-icon">{tab === "mail" ? <Mail size={28} /> : <CalendarDays size={28} />}</div>
+            <h1>{tab === "mail" ? "Gmail" : "Calendar"}</h1>
+            <p className="muted">Use the Agent desk to search, clarify, and approve Gmail or Calendar actions through MCP.</p>
+            <button className="secondary-button" onClick={() => setTab("intent")}>Open Agent desk <ChevronRight size={16} /></button>
+          </section>
+        )}
+      </main>
+    </div>
+  );
 }
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("orbit_token"));
   const error = new URLSearchParams(window.location.search).get("error");
-  function updateToken(value) { localStorage.setItem("orbit_token", value); setToken(value); }
-  function logout() { localStorage.removeItem("orbit_token"); setToken(null); }
-  if (window.location.pathname === "/auth/callback") return <AuthCallback onToken={updateToken} />;
+
+  function updateToken(value) {
+    localStorage.setItem("orbit_token", value);
+    setToken(value);
+  }
+
+  function logout() {
+    localStorage.removeItem("orbit_token");
+    setToken(null);
+  }
+
+  if (window.location.pathname === "/auth/callback") {
+    return <AuthCallback onToken={updateToken} />;
+  }
+
   return token ? <Dashboard token={token} onLogout={logout} /> : <Login error={error} />;
 }
 

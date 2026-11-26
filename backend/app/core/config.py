@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2
     llm_max_tokens: int = 4096  # R1 "thinking" tokens count against this
 
+    # --- MCP ---
+    # stdio: each Google MCP server runs as a subprocess speaking MCP over stdin/stdout.
+    # inprocess: same servers and protocol over an in-memory transport (tests / single-process deployments).
+    mcp_transport: str = "stdio"
+    mcp_timeout_seconds: float = 60.0
+
+    @field_validator("mcp_transport")
+    @classmethod
+    def _known_transport(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"stdio", "inprocess"}:
+            raise ValueError("MCP_TRANSPORT must be 'stdio' or 'inprocess'")
+        return v
+
     @field_validator("jwt_secret")
     @classmethod
     def _jwt_secret_strong(cls, v: str) -> str:

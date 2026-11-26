@@ -8,6 +8,7 @@ os.environ.setdefault("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-secret")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+os.environ.setdefault("MCP_TRANSPORT", "inprocess")
 # Tests must never reach a real LLM, whatever the developer has exported.
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["GEMINI_API_KEY"] = ""
