@@ -10,6 +10,10 @@ def _b64(s: str) -> str:
     return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")  # Gmail omits padding
 
 
+def _b64_bytes(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+
 def _decode_raw(raw: str):
     return email.message_from_bytes(base64.urlsafe_b64decode(raw))
 
@@ -67,6 +71,25 @@ def test_html_fallback_strips_scripts_and_decodes_entities():
     html = "<html><style>p{}</style><script>alert(1)</script><p>Hello&nbsp;<b>World</b></p><p>2 &lt; 3</p></html>"
     t = mime.parse_message({"id": "1", "payload": {"mimeType": "text/html", "body": {"data": _b64(html)}}}).body_text
     assert "alert" not in t and "p{}" not in t and "Hello" in t and "World" in t and "2 < 3" in t
+
+
+def test_nested_multipart_prefers_plain_text_and_decodes_declared_charset():
+    raw = {"id": "1", "payload": {"mimeType": "multipart/mixed", "parts": [
+        {"mimeType": "multipart/alternative", "parts": [
+            {"mimeType": "text/html", "body": {"data": _b64("<p>html version</p>")}},
+            {"mimeType": "text/plain", "headers": [{"name": "Content-Type", "value": "text/plain; charset=iso-8859-1"}],
+             "body": {"data": _b64_bytes("caf\xe9".encode("latin-1"))}},
+        ]},
+    ]}}
+    assert mime.parse_message(raw).body_text == "café"
+
+
+def test_empty_or_malformed_message_body_is_handled_without_using_snippet():
+    empty = mime.parse_message({"id": "1", "snippet": "subject preview only", "payload": {}})
+    malformed = mime.parse_message({"id": "2", "snippet": "preview", "payload": {
+        "mimeType": "text/plain", "body": {"data": "%%%not-base64%%%"},
+    }})
+    assert empty.body_text == "" and malformed.body_text == ""
 
 
 def test_attachments_listed_not_inlined_and_long_body_truncated():

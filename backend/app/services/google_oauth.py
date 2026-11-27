@@ -150,5 +150,5 @@ def revoke_token(token: str) -> None:
     """Best-effort revocation; failures are logged, not raised."""
     try:
         httpx.post(REVOKE_URL, data={"token": token}, timeout=TIMEOUT)
-    except httpx.HTTPError:
-        log.warning("Google token revocation failed", exc_info=True)
+    except httpx.HTTPError as exc:
+        log.warning("Google token revocation failed exception_type=%s", type(exc).__name__)

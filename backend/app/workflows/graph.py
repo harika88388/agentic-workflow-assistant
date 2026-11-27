@@ -10,6 +10,7 @@ Any node failure is caught, recorded in `error` and routed straight to generate_
 an honest answer and nothing is reported as done unless an MCP tool confirmed it.
 """
 import logging
+import time
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -19,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.base import AgentContext, AgentOutcome
 from app.agents.service_selector import ServiceSelection
+from app.core.logging_context import current_correlation_id
 from app.database.models import Message
 from app.mcp.errors import MCPToolError
 from app.schemas.intent import QUESTIONS, IntentResult
@@ -57,17 +59,23 @@ def node(name: str) -> Callable:
         # No functools.wraps: LangGraph inspects the signature to decide whether to pass `config`.
         def wrapper(state: WorkflowState, config: RunnableConfig) -> dict[str, Any]:
             deps: WorkflowDeps = config["configurable"]["deps"]
+            trace = state.get("trace", [])
+            previous_node = trace[-1]["node"] if trace else "START"
+            request_id = state.get("message_id", current_correlation_id())
+            started = time.perf_counter()
+            log.info("workflow transition request_id=%s from=%s to=%s", request_id, previous_node, name)
             try:
                 update = fn(state, deps) or {}
             except Exception as exc:  # noqa: BLE001 - every failure becomes an explicit, reported error
                 code, message = classify_error(exc)
-                if code == "internal_error":
-                    log.exception("workflow node %s failed", name)
-                else:
-                    log.warning("workflow node %s failed: %s", name, code)
+                log.error("workflow node failed request_id=%s node=%s code=%s exception_type=%s duration_ms=%d",
+                          request_id, name, code, type(exc).__name__,
+                          round((time.perf_counter() - started) * 1000))
                 return {"status": "failed", "error": {"code": code, "message": message, "node": name},
                         "trace": [{"node": name, "status": "error", "detail": code}]}
             detail = update.pop("detail", None)
+            log.info("workflow node completed request_id=%s node=%s status=ok duration_ms=%d",
+                     request_id, name, round((time.perf_counter() - started) * 1000))
             return {**update, "trace": [{"node": name, "status": "ok", **({"detail": detail} if detail else {})}]}
         wrapper.__name__ = name
         return wrapper
@@ -88,6 +96,8 @@ def load_context(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
 def select_service(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
     assert d.ctx is not None
     sel = d.selector.select(state["message"], pending_service=(d.ctx.pending or {}).get("service"))
+    log.info("service selected request_id=%s service=%s source=%s",
+             current_correlation_id(), sel.service, sel.source)
     return {"selection": sel.to_dict(), "detail": f"{sel.service} via {sel.source}"}
 
 
@@ -95,10 +105,13 @@ def select_service(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
 def recognize_intent(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
     assert d.ctx is not None
     hint = state["selection"]["service"]
-    d.llm_calls.append(d.llm.call_record(LLMRole.INTENT))
     ir = d.intent_agent.recognize(state["message"], reference_date=d.now.date(), timezone=d.tz.key,
                                   conversation_context=d.context_agent.render_for_intent(d.ctx),
                                   service_hint=hint if hint != "unknown" else None)
+    if d.intent_agent.last_used_llm:
+        d.llm_calls.append(d.llm.call_record(LLMRole.INTENT))
+    log.info("intent detected request_id=%s service=%s intent=%s follow_up=%s",
+             current_correlation_id(), ir.service, ir.intent, ir.is_follow_up)
     return {"intent": ir.model_dump(), "detail": f"{ir.intent} (follow_up={ir.is_follow_up})"}
 
 
@@ -153,6 +166,8 @@ def _run_agent(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
     agent = d.agents[req["intent"]]
     if agent.service != state["service"]:
         raise ValueError(f"{req['intent']} is not a {state['service']} operation")
+    log.info("agent selected request_id=%s agent=%s service=%s intent=%s",
+             current_correlation_id(), type(agent).__name__, agent.service, req["intent"])
     actx = AgentContext(intent=req["intent"], entities=dict(req["entities"]), message=state["message"], tz=d.tz,
                         now=d.now, memory=d.ctx.memory, pending=d.ctx.pending,
                         tool_results=dict(state.get("tool_results") or {}), user_name=d.user.name or "")

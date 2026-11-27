@@ -23,7 +23,12 @@ def _start_login(client):
 def test_login_builds_google_url_with_offline_access(client):
     q, nonce = _start_login(client)
     assert q["access_type"] == ["offline"] and q["response_type"] == ["code"]
-    assert any("gmail" in s for s in q["scope"][0].split()) and any("calendar" in s for s in q["scope"][0].split())
+    scopes = set(q["scope"][0].split())
+    assert "https://www.googleapis.com/auth/gmail.readonly" in scopes
+    assert "https://www.googleapis.com/auth/gmail.send" in scopes
+    assert "https://www.googleapis.com/auth/gmail.compose" in scopes
+    assert "https://www.googleapis.com/auth/calendar" in scopes
+    assert q["prompt"] == ["consent"]
     assert nonce
 
 
@@ -84,6 +89,19 @@ def test_me_reports_connection_status_and_requires_auth(client, mock_google):
 
 def test_partial_scopes_report_gmail_only(client, mock_google):
     mock_google["scope"] = "openid email https://www.googleapis.com/auth/gmail.modify"
+    q, nonce = _start_login(client)
+    _set_nonce(client, nonce)
+    loc = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]}).headers["location"]
+    token = parse_qs(loc.split("#", 1)[1])["token"][0]
+    r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert r.json()["connections"] == {"gmail": True, "calendar": False}
+
+
+def test_new_scoped_gmail_permissions_report_connected(client, mock_google):
+    mock_google["scope"] = (
+        "openid email https://www.googleapis.com/auth/gmail.readonly "
+        "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose"
+    )
     q, nonce = _start_login(client)
     _set_nonce(client, nonce)
     loc = client.get("/api/auth/google/callback", params={"code": "c", "state": q["state"][0]}).headers["location"]

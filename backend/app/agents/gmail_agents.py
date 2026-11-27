@@ -5,6 +5,7 @@ from typing import Any
 from app.agents.base import (
     AgentContext, AgentOutcome, OperationAgent, Proposal, ToolCall, compact_email, email_address,
 )
+from app.agents.email_understanding_agent import EmailUnderstandingAgent
 from app.agents.summarization_agent import SummarizationAgent
 from app.agents.task_agent import TaskAutomationAgent
 
@@ -83,16 +84,50 @@ class ReadEmailAgent(OperationAgent):
     service, intent = "gmail", "read_email"
     description = "Open one email (by id, reference or most recent search match) and show its content."
 
+    def __init__(self, understanding: EmailUnderstandingAgent):
+        self.understanding = understanding
+
     def step(self, ctx: AgentContext) -> AgentOutcome:
         m, early = _target_message(ctx)
         if early:
             return early
         assert m is not None
-        body = (m.get("body_text") or m.get("snippet") or "").strip()
-        text = (f"From: {m.get('sender')}\nSubject: {m.get('subject') or '(no subject)'}\nDate: {m.get('date')}\n\n"
-                f"{body[:1500]}{'...' if len(body) > 1500 else ''}")
-        return AgentOutcome("result", message=text, data={"message": {**compact_email(m), "body_text": body[:5000],
-                                                                      "attachments": m.get("attachments", [])}},
+        body = (m.get("body_text") or "").strip()
+        analysis = self.understanding.analyze(m)
+        lines = [
+            f"Email from {m.get('sender') or 'unknown sender'}",
+            f"Subject: {m.get('subject') or '(no subject)'}",
+            f"Date: {m.get('date') or 'unknown'}",
+            f"Summary: {analysis.summary}",
+        ]
+        if analysis.meeting_mentioned:
+            details = analysis.meeting_details
+            meeting = "A meeting is mentioned"
+            if details.scheduled:
+                meeting = "The email says a meeting is scheduled"
+            if details.time_description:
+                meeting += f" for {details.time_description}"
+            if details.date:
+                meeting += f" on {details.date}"
+            if details.time_description and not details.exact_time:
+                meeting += "; no exact time is specified"
+            elif details.exact_time:
+                meeting += f" at {details.exact_time}"
+            lines.append(meeting + ".")
+        if analysis.important_information:
+            lines.append("Important information:\n" + "\n".join(f"- {item}" for item in analysis.important_information))
+        if analysis.action_items:
+            lines.append("Action items:\n" + "\n".join(f"- {item}" for item in analysis.action_items))
+        if analysis.requests:
+            lines.append("Requests:\n" + "\n".join(f"- {item}" for item in analysis.requests))
+        if analysis.instructions:
+            lines.append("Instructions:\n" + "\n".join(f"- {item}" for item in analysis.instructions))
+        if analysis.questions:
+            lines.append("Questions:\n" + "\n".join(f"- {item}" for item in analysis.questions))
+        return AgentOutcome("result", message="\n\n".join(lines),
+                            data={"message": {**compact_email(m), "body_text": body[:5000],
+                                              "attachments": m.get("attachments", [])},
+                                  "understanding": analysis.model_dump()},
                             memory=_focus_memory(m))
 
 
@@ -194,6 +229,7 @@ class ReplyEmailAgent(_ComposeAgent):
 
 
 def build_gmail_agents(summarizer: SummarizationAgent, task: TaskAutomationAgent) -> dict[str, OperationAgent]:
-    agents: list[OperationAgent] = [SendEmailAgent(task), SearchEmailAgent(), ReadEmailAgent(), ReplyEmailAgent(task),
+    understanding = EmailUnderstandingAgent(summarizer.llm, summarizer.call_log)
+    agents: list[OperationAgent] = [SendEmailAgent(task), SearchEmailAgent(), ReadEmailAgent(understanding), ReplyEmailAgent(task),
                                     SummarizeEmailsAgent(summarizer), CreateDraftAgent(task)]
     return {a.intent: a for a in agents}

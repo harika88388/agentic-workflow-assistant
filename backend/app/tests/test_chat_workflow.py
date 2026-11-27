@@ -1,5 +1,6 @@
 """End-to-end: HTTP -> LangGraph -> agents -> MCP (real protocol, in-process servers) -> real Gmail/Calendar services
 over fake Google clients -> approval -> execution through MCP. Only the LLM and Google's HTTP layer are faked."""
+import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -117,6 +118,65 @@ def test_find_professor_emails_then_summarize_latest_one(env):
     assert "The exam moves to Friday" in summary_prompt and "Week 1" not in summary_prompt
 
 
+def test_latest_email_read_uses_complete_body_and_email_followups_reuse_same_message(env):
+    env.gmail.add("m1", "aacorner <sender@example.com>", "You are gay",
+                  "This is to inform you that a meeting has been scheduled tonight to discuss if u are gay.",
+                  "2026-11-27T10:00:00+00:00")
+    env.llm.email_understanding = {
+        "subject": "You are gay",
+        "main_topic": "A meeting has been scheduled to discuss whether the recipient is gay.",
+        "meeting_mentioned": True,
+        "meeting_details": {"scheduled": True, "date": None, "time_description": "tonight", "exact_time": None},
+        "action_items": [],
+        "summary": ("The sender informs the recipient that a meeting has been scheduled for tonight "
+                    "to discuss whether the recipient is gay."),
+    }
+
+    first = env.say("What does my latest email say?")
+    assert first["status"] == "completed"
+    assert "meeting has been scheduled for tonight" in first["assistant_message"]["content"]
+    assert "no exact time is specified" in first["assistant_message"]["content"]
+    assert first["assistant_message"]["meta"]["intent"] == "read_email"
+    assert [call["tool"] for call in first["assistant_message"]["meta"]["mcp_calls"]] == [
+        "search_emails", "read_email",
+    ]
+    assert first["assistant_message"]["meta"]["llm_calls"] == [
+        {"role": "email_understanding", "provider": "openrouter", "model": "deepseek/deepseek-r1-0528"},
+    ]
+    assert env.gmail.searches == ["in:inbox"]
+
+    env.llm.intents = [
+        '{"intent":"get_events","entities":{"query":"meeting"}}',
+        '{"intent":"unknown","requires_clarification":true}',
+    ]
+    for question in ("What time is the meeting?", "Who sent it?"):
+        followup = env.say(question)
+        assert followup["assistant_message"]["meta"]["intent"] == "read_email"
+        assert followup["assistant_message"]["meta"]["entities"] == {"message_id": "m1"}
+        calls = followup["assistant_message"]["meta"]["mcp_calls"]
+        assert [call["tool"] for call in calls] == ["read_email"]
+    assert "aacorner" in followup["assistant_message"]["content"]
+
+
+def test_sender_specific_email_summary_reads_the_full_message(env):
+    env.gmail.add("m1", "aacorner <sender@example.com>", "Schedule update",
+                  "The meeting has been moved to Friday at 2 PM.", "2026-11-27T10:00:00+00:00")
+    env.llm.summary = {
+        "summary": "The meeting has been moved to Friday at 2 PM.",
+        "key_points": ["Meeting Friday at 2 PM."],
+        "action_items": [],
+    }
+
+    turn = env.say("Summarize the email from aacorner.")
+    assert turn["assistant_message"]["meta"]["intent"] == "summarize_emails"
+    assert turn["assistant_message"]["meta"]["entities"] == {"query": "from:aacorner"}
+    assert [call["tool"] for call in turn["assistant_message"]["meta"]["mcp_calls"]] == [
+        "search_emails", "read_email",
+    ]
+    summary_input = next(call["messages"][1].content for call in env.llm.calls if call["role"] == "summary")
+    assert "Schedule update" in summary_input and "moved to Friday at 2 PM" in summary_input
+
+
 # ---------- Example 3: recipient carried over, pronoun resolved, approval gate ----------
 def test_send_email_then_tell_him_resolves_recipient_and_waits_for_approval(env):
     env.llm.intents = ['{"intent":"send_email","entities":{"recipient_email":"professor@example.com"}}',
@@ -209,6 +269,25 @@ def test_mcp_tool_discovery_endpoint(env, client):
     r = client.get("/api/mcp/tools", headers=env.h).json()
     assert r["transport"] == "inprocess"
     assert len(r["servers"]["gmail"]["tools"]) == 6 and len(r["servers"]["calendar"]["tools"]) == 6
+
+
+def test_workflow_logs_correlated_steps_without_request_content(env, caplog):
+    env.llm.intents = ['{"intent":"search_emails","entities":{"query":"invoice"}}']
+    private_marker = "PRIVATE_REQUEST_CONTENT_MARKER"
+    with caplog.at_level(logging.INFO):
+        env.say(f"Search my emails for invoice. {private_marker}")
+
+    messages = [record.getMessage() for record in caplog.records]
+    submitted = next(message for message in messages if "user request submitted" in message)
+    request_id = submitted.split("request_id=", 1)[1].split()[0]
+    assert f"workflow transition request_id={request_id} from=START to=load_context" in messages
+    assert any(f"intent detected request_id={request_id} service=gmail intent=search_emails" in message
+               for message in messages)
+    assert any(f"agent selected request_id={request_id}" in message and "service=gmail" in message
+               for message in messages)
+    assert any(f"mcp tools discovered request_id={request_id} server=gmail" in message for message in messages)
+    assert any(f"workflow execution finished request_id={request_id}" in message for message in messages)
+    assert private_marker not in caplog.text
 
 
 def test_workflow_records_reference_the_conversation(env, db_session):

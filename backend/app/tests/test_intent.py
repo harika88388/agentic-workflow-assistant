@@ -103,6 +103,27 @@ def test_agent_happy_path_and_prompt_contents():
     assert "Tuesday, 2026-11-24" in system and "Asia/Kolkata" in system
 
 
+@pytest.mark.parametrize(("message", "intent", "query"), [
+    ("What does my latest email say?", "read_email", "in:inbox"),
+    ("Did I receive any email about a meeting?", "search_emails", "meeting"),
+    ("Summarize the email from aacorner.", "summarize_emails", "from:aacorner"),
+])
+def test_clear_email_read_requests_are_routed_without_composition(message, intent, query):
+    a, provider = agent([])
+    result = a.recognize(message, reference_date=REF, timezone="UTC")
+    assert result.service == "gmail" and result.intent == intent
+    assert result.entities.query == query and not provider.calls and not a.last_used_llm
+
+
+def test_explicit_send_request_still_uses_send_intent():
+    a, provider = agent(['{"intent":"send_email","entities":{"recipient_email":"john@example.com",'
+                         '"body":"I will be absent tomorrow"}}'])
+    result = a.recognize("Send an email to John saying I'll be absent tomorrow.",
+                         reference_date=REF, timezone="UTC")
+    assert result.intent == "send_email" and result.entities.body == "I will be absent tomorrow"
+    assert provider.calls and a.last_used_llm
+
+
 def test_agent_passes_conversation_context_as_reference_only():
     a, p = agent(['{"intent":"send_email","entities":{"recipient_email":"prof@example.com","body":"I will miss class"},"is_follow_up":true}'])
     r = a.recognize("Tell him I'll miss today's lecture", reference_date=REF, timezone="UTC",

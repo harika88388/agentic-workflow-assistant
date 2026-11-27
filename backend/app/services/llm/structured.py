@@ -31,7 +31,8 @@ def complete_structured(router: LLMRouter, role: LLMRole, messages: list[ChatMes
             return parse_structured(raw, schema)
         except ValueError as exc:  # JSONExtractionError and pydantic ValidationError are both ValueErrors
             last = exc
-            log.warning("invalid structured output (attempt %d/%d): %s", attempt, max_attempts, _summarize(exc))
+            log.warning("invalid structured output attempt=%d/%d exception_type=%s",
+                        attempt, max_attempts, type(exc).__name__)
             msgs = msgs + [
                 ChatMessage("assistant", strip_reasoning(raw)[:4000]),
                 ChatMessage("user", f"Your reply was invalid: {_summarize(exc)}. Reply again with ONLY the corrected JSON object."),

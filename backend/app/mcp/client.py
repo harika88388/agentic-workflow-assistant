@@ -22,6 +22,7 @@ from mcp import Client, MCPError, StdioServerParameters
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.core.logging_context import current_correlation_id
 from app.mcp.errors import MCPToolError, parse_tool_error
 
 log = logging.getLogger(__name__)
@@ -76,8 +77,9 @@ class MCPGateway:
         if stack is not None:
             try:
                 stack.close()
-            except Exception:  # noqa: BLE001 - a failing shutdown must not mask the request's own result
-                log.warning("error while closing MCP connections", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 - a failing shutdown must not mask the request's own result
+                log.warning("MCP connection close failed request_id=%s exception_type=%s",
+                            current_correlation_id(), type(exc).__name__)
 
     @property
     def servers(self) -> list[str]:
@@ -92,7 +94,8 @@ class MCPGateway:
             try:
                 client = self._stack.enter_context(self._portal.wrap_async_context_manager(self._factories[server]()))
             except Exception as exc:  # noqa: BLE001
-                log.error("MCP connection to %s failed: %s", server, type(exc).__name__)
+                log.error("MCP connection failed request_id=%s server=%s exception_type=%s",
+                          current_correlation_id(), server, type(exc).__name__)
                 raise MCPToolError("mcp_connection_failed", f"Could not connect to the {server} MCP server.",
                                    server=server) from exc
             self._clients[server] = client
@@ -101,10 +104,18 @@ class MCPGateway:
     def list_tools(self, server: str) -> list[ToolInfo]:
         """Tool discovery (MCP tools/list), cached for the life of the connection."""
         if server not in self._tools:
-            client = self._client(server)
+            started = time.perf_counter()
+            correlation_id = current_correlation_id()
+            log.info("mcp tool discovery started request_id=%s server=%s", correlation_id, server)
             try:
+                client = self._client(server)
                 listing = self._portal.call(client.list_tools)  # type: ignore[union-attr]
+            except MCPToolError:
+                raise
             except Exception as exc:  # noqa: BLE001
+                log.error("mcp tool discovery failed request_id=%s server=%s exception_type=%s duration_ms=%d",
+                          correlation_id, server, type(exc).__name__,
+                          round((time.perf_counter() - started) * 1000))
                 raise MCPToolError("mcp_connection_failed", f"Could not list tools on the {server} MCP server.",
                                    server=server) from exc
             self._tools[server] = {
@@ -112,6 +123,9 @@ class MCPGateway:
                                  t.annotations.read_only_hint if t.annotations else None)
                 for t in listing.tools
             }
+            log.info("mcp tools discovered request_id=%s server=%s count=%d duration_ms=%d",
+                     correlation_id, server, len(self._tools[server]),
+                     round((time.perf_counter() - started) * 1000))
         return list(self._tools[server].values())
 
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +135,7 @@ class MCPGateway:
         client = self._client(server)
         args = {k: v for k, v in arguments.items() if v is not None}
         started = time.perf_counter()
+        correlation_id = current_correlation_id()
         record: dict[str, Any] = {"server": server, "tool": tool}
         try:
             result = self._portal.call(partial(client.call_tool, tool, args,  # type: ignore[union-attr]
@@ -128,7 +143,8 @@ class MCPGateway:
         except MCPError as exc:
             err = MCPToolError("mcp_protocol_error", f"{tool} failed: {exc}", server=server, tool=tool)
         except Exception as exc:  # noqa: BLE001 - transport failure / timeout
-            log.error("MCP call %s.%s failed: %s", server, tool, type(exc).__name__)
+            log.error("MCP call failed request_id=%s tool=%s.%s exception_type=%s",
+                      correlation_id, server, tool, type(exc).__name__)
             err = MCPToolError("mcp_connection_failed", f"The {server} MCP server did not respond.",
                                server=server, tool=tool)
         else:
@@ -138,7 +154,8 @@ class MCPGateway:
         if err is not None:
             record["error"] = err.code
         self.calls.append(record)
-        log.info("mcp %s.%s ok=%s %sms", server, tool, record["ok"], record["ms"])
+        log.info("mcp tool invocation request_id=%s tool=%s.%s ok=%s duration_ms=%s error_code=%s",
+                 correlation_id, server, tool, record["ok"], record["ms"], record.get("error", "-"))
         if err is not None:
             raise err
         return _payload(result)
@@ -158,6 +175,9 @@ def stdio_factories(settings: Settings, user_id: uuid.UUID) -> dict[str, ClientF
         "APP_ENV": settings.app_env,
         "PYTHONPATH": str(BACKEND_DIR),
     }
+    correlation_id = current_correlation_id()
+    if correlation_id != "-":
+        env["MCP_REQUEST_ID"] = correlation_id
 
     def factory(module: str) -> ClientFactory:
         params = StdioServerParameters(command=sys.executable, args=["-m", module], env=env, cwd=str(BACKEND_DIR))

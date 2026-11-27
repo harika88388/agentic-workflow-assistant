@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy.orm import Session
 
+from app.core.logging_context import correlation_context
 from app.integrations.calendar.client import CalendarClient
 from app.integrations.calendar.service import CalendarService
 from app.integrations.calendar.timeutil import get_zone
@@ -90,10 +91,12 @@ def stdio_calendar_scope(user_id: uuid.UUID) -> CalendarScope:
 
 def run_stdio_server(build: Callable[[uuid.UUID], MCPServer]) -> None:
     # stdout carries the MCP protocol: all logging must go to stderr.
-    logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         user_id = uuid.UUID(os.environ[USER_ENV])
     except (KeyError, ValueError):
         sys.stderr.write(f"{USER_ENV} must be set to the user's UUID\n")
         raise SystemExit(2) from None
-    build(user_id).run("stdio")
+    with correlation_context(os.environ.get("MCP_REQUEST_ID", "-")):
+        build(user_id).run("stdio")

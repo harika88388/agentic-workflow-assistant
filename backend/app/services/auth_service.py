@@ -4,7 +4,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import CALENDAR_SCOPE, GMAIL_SCOPE
+from app.core.config import (
+    CALENDAR_SCOPE,
+    GMAIL_COMPOSE_SCOPE,
+    GMAIL_READ_SCOPE,
+    GMAIL_SCOPE,
+    GMAIL_SEND_SCOPE,
+)
 from app.core.security import encrypt_secret
 from app.database.models import OAuthCredential, User
 from app.services.google_oauth import GoogleIdentity, GoogleTokens
@@ -43,7 +49,10 @@ def connection_status(cred: OAuthCredential | None) -> dict[str, bool]:
     if cred is None or cred.status != "active":
         return {"gmail": False, "calendar": False}
     scopes = cred.scope_set
-    return {"gmail": GMAIL_SCOPE in scopes, "calendar": CALENDAR_SCOPE in scopes}
+    gmail_connected = GMAIL_SCOPE in scopes or {
+        GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE, GMAIL_COMPOSE_SCOPE
+    }.issubset(scopes)
+    return {"gmail": gmail_connected, "calendar": CALENDAR_SCOPE in scopes}
 
 
 def get_google_credential(db: Session, user_id) -> OAuthCredential | None:

@@ -1,11 +1,12 @@
 """Stdlib-only Gmail MIME helpers: build outgoing messages safely, parse incoming ones."""
 import base64
+import binascii
 import html
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.parser import HeaderParser
+from email.message import Message as MIMEHeader
 from email.policy import SMTP
 from email.utils import parseaddr
 from html.parser import HTMLParser
@@ -110,8 +111,15 @@ def reply_headers(target: EmailMessageData) -> tuple[str, str]:
 
 # ---------- incoming ----------
 
-def decode_part(data: str) -> str:
-    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace")
+def decode_part(data: str, charset: str = "utf-8") -> str:
+    try:
+        decoded = base64.b64decode(data + "=" * (-len(data) % 4), altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        return ""
+    try:
+        return decoded.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return decoded.decode("utf-8", errors="replace")
 
 
 class _TextExtractor(HTMLParser):
@@ -143,51 +151,73 @@ def html_to_text(markup: str) -> str:
 
 
 def _walk(part: dict):
+    if not isinstance(part, dict):
+        return
     yield part
     for child in part.get("parts") or []:
         yield from _walk(child)
 
 
+def _charset(part: dict) -> str:
+    content_type = _header(part, "Content-Type") or part.get("mimeType", "")
+    header = MIMEHeader()
+    header["Content-Type"] = content_type if isinstance(content_type, str) else "text/plain"
+    return header.get_content_charset() or "utf-8"
+
+
 def extract_text(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
     plain: list[str] = []
     markup: list[str] = []
     for p in _walk(payload):
         if p.get("filename"):
             continue  # attachment
-        data = (p.get("body") or {}).get("data")
-        if not data:
+        part_body = p.get("body")
+        data = part_body.get("data") if isinstance(part_body, dict) else None
+        if not isinstance(data, str) or not data:
             continue
         mt = p.get("mimeType", "")
         if mt == "text/plain":
-            plain.append(decode_part(data))
+            plain.append(decode_part(data, _charset(p)))
         elif mt == "text/html":
-            markup.append(decode_part(data))
+            markup.append(decode_part(data, _charset(p)))
     text = "\n".join(plain).strip() or html_to_text("\n".join(markup))
     return text if len(text) <= MAX_BODY_CHARS else text[:MAX_BODY_CHARS] + "\n[truncated]"
 
 
 def _header(payload: dict, name: str) -> str:
     for h in payload.get("headers") or []:
-        if h.get("name", "").lower() == name.lower():
-            return h.get("value", "")
+        if not isinstance(h, dict):
+            continue
+        header_name = h.get("name")
+        if isinstance(header_name, str) and header_name.lower() == name.lower():
+            value = h.get("value")
+            return value if isinstance(value, str) else ""
     return ""
 
 
 def _attachments(payload: dict) -> list[dict]:
     out = []
     for p in _walk(payload):
-        if p.get("filename") and (p.get("body") or {}).get("attachmentId"):
-            out.append({"filename": p["filename"], "mime_type": p.get("mimeType", ""), "size": p["body"].get("size", 0)})
+        part_body = p.get("body")
+        if p.get("filename") and isinstance(part_body, dict) and part_body.get("attachmentId"):
+            out.append({"filename": p["filename"], "mime_type": p.get("mimeType", ""), "size": part_body.get("size", 0)})
     return out
 
 
 def parse_message(raw: dict, include_body: bool = True) -> EmailMessageData:
     payload = raw.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
     internal = None
     if raw.get("internalDate"):
-        internal = datetime.fromtimestamp(int(raw["internalDate"]) / 1000, tz=timezone.utc).isoformat()
+        try:
+            internal = datetime.fromtimestamp(int(raw["internalDate"]) / 1000, tz=timezone.utc).isoformat()
+        except (OverflowError, TypeError, ValueError):
+            pass
     return EmailMessageData(
-        id=raw["id"],
+        id=str(raw.get("id") or ""),
         thread_id=raw.get("threadId", ""),
         sender=_header(payload, "From"),
         to=_header(payload, "To"),
@@ -195,8 +225,8 @@ def parse_message(raw: dict, include_body: bool = True) -> EmailMessageData:
         subject=_header(payload, "Subject"),
         date=_header(payload, "Date"),
         internal_date=internal,
-        snippet=html.unescape(raw.get("snippet", "")),
-        labels=list(raw.get("labelIds") or []),
+        snippet=html.unescape(str(raw.get("snippet") or "")),
+        labels=list(raw.get("labelIds") or []) if isinstance(raw.get("labelIds") or [], list) else [],
         body_text=extract_text(payload) if include_body else "",
         message_id_header=_header(payload, "Message-ID") or _header(payload, "Message-Id"),
         in_reply_to=_header(payload, "In-Reply-To"),

@@ -13,10 +13,15 @@ GOOGLE_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/gmail.modify",  # read, send, drafts, threads
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",  # drafts
     "https://www.googleapis.com/auth/calendar",  # events + free/busy
 ]
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"  # legacy credentials remain supported
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
 

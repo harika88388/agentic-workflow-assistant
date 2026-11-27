@@ -1,4 +1,6 @@
 """Runs one conversation turn through the LangGraph workflow, and records approval decisions in the conversation."""
+import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from app.agents.service_selector import ServiceSelectorAgent
 from app.agents.summarization_agent import SummarizationAgent
 from app.agents.task_agent import TaskAutomationAgent
 from app.api.deps import user_zone
+from app.core.logging_context import correlation_context
 from app.database.models import Conversation, Message, User, WorkflowExecution
 from app.mcp.client import MCPGateway
 from app.services.llm.router import LLMRouter
@@ -24,6 +27,7 @@ from app.workflows.state import WorkflowDeps
 
 GatewayFactory = Callable[[Session, User], MCPGateway]
 DEFAULT_TITLES = {"New conversation", "New workspace"}
+log = logging.getLogger(__name__)
 
 
 class ConversationNotFound(Exception):
@@ -51,6 +55,7 @@ def owned_conversation(db: Session, user: User, conversation_id: uuid.UUID) -> C
 
 def run_turn(db: Session, user: User, conversation_id: uuid.UUID, content: str, *, llm: LLMRouter,
              gateway_factory: GatewayFactory, now: datetime | None = None) -> TurnResult:
+    started = time.perf_counter()
     content = (content or "").strip()
     if not content or len(content) > MAX_MESSAGE_CHARS:
         raise ValueError(f"message must be 1-{MAX_MESSAGE_CHARS} characters")
@@ -64,23 +69,38 @@ def run_turn(db: Session, user: User, conversation_id: uuid.UUID, content: str, 
 
     tz = user_zone(user)
     llm_calls: list[dict[str, Any]] = []
-    with gateway_factory(db, user) as gateway:
-        deps = WorkflowDeps(
-            db=db, user=user, conversation=conversation, llm=llm, gateway=gateway, tz=tz,
-            now=(now or clock(tz)).astimezone(tz), selector=ServiceSelectorAgent(),
-            context_agent=ContextEnhancementAgent(), intent_agent=IntentRecognitionAgent(llm),
-            agents={**build_gmail_agents(SummarizationAgent(llm, llm_calls), TaskAutomationAgent(llm, llm_calls)),
-                    **build_calendar_agents()},
-            llm_calls=llm_calls, user_message_id=user_msg.id,
-        )
-        state = get_graph().invoke({"message": content, "message_id": str(user_msg.id), "trace": []},
-                                   config={"configurable": {"deps": deps}, "recursion_limit": 60})
-    if not state.get("assistant_message_id"):
-        db.rollback()
-        raise RuntimeError("the conversation turn could not be saved")
-    assistant = db.get(Message, uuid.UUID(state["assistant_message_id"]))
-    workflow = db.get(WorkflowExecution, uuid.UUID(state["workflow"]["id"])) if state.get("workflow") else None
-    return TurnResult(user_msg, assistant, state["status"], workflow)  # type: ignore[arg-type]
+    request_id = str(user_msg.id)
+    with correlation_context(request_id):
+        log.info("user request submitted request_id=%s message_chars=%d", request_id, len(content))
+        log.info("workflow execution started request_id=%s", request_id)
+        try:
+            with gateway_factory(db, user) as gateway:
+                deps = WorkflowDeps(
+                    db=db, user=user, conversation=conversation, llm=llm, gateway=gateway, tz=tz,
+                    now=(now or clock(tz)).astimezone(tz), selector=ServiceSelectorAgent(),
+                    context_agent=ContextEnhancementAgent(), intent_agent=IntentRecognitionAgent(llm),
+                    agents={**build_gmail_agents(SummarizationAgent(llm, llm_calls),
+                                                 TaskAutomationAgent(llm, llm_calls)),
+                            **build_calendar_agents()},
+                    llm_calls=llm_calls, user_message_id=user_msg.id,
+                )
+                state = get_graph().invoke({"message": content, "message_id": request_id, "trace": []},
+                                           config={"configurable": {"deps": deps}, "recursion_limit": 60})
+        except Exception as exc:
+            log.error("workflow execution raised request_id=%s exception_type=%s duration_ms=%d",
+                      request_id, type(exc).__name__, round((time.perf_counter() - started) * 1000))
+            raise
+        if not state.get("assistant_message_id"):
+            db.rollback()
+            log.error("workflow result missing assistant message request_id=%s duration_ms=%d",
+                      request_id, round((time.perf_counter() - started) * 1000))
+            raise RuntimeError("the conversation turn could not be saved")
+        assistant = db.get(Message, uuid.UUID(state["assistant_message_id"]))
+        workflow = db.get(WorkflowExecution, uuid.UUID(state["workflow"]["id"])) if state.get("workflow") else None
+        log.info("workflow execution finished request_id=%s status=%s workflow_id=%s duration_ms=%d",
+                 request_id, state["status"], workflow.id if workflow else "-",
+                 round((time.perf_counter() - started) * 1000))
+        return TurnResult(user_msg, assistant, state["status"], workflow)  # type: ignore[arg-type]
 
 
 def _result_text(execution: WorkflowExecution) -> str:

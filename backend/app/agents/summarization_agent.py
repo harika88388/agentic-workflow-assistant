@@ -9,8 +9,8 @@ from app.services.llm.router import LLMRole, LLMRouter
 from app.services.llm.structured import complete_structured
 
 MAX_EMAILS = 5
-MAX_EMAIL_CHARS = 3000
-MAX_TOTAL_CHARS = 12000
+MAX_EMAIL_CHARS = 20_000
+MAX_TOTAL_CHARS = 25_000
 
 
 class EmailSummary(BaseModel):
@@ -38,7 +38,9 @@ class EmailSummary(BaseModel):
 def _render(emails: list[dict[str, Any]]) -> str:
     blocks, total = [], 0
     for i, e in enumerate(emails[:MAX_EMAILS], 1):
-        body = (e.get("body_text") or e.get("snippet") or "")[:MAX_EMAIL_CHARS]
+        body = (e.get("body_text") or "")[:MAX_EMAIL_CHARS]
+        if not body:
+            body = "[No readable body available.]"
         block = (f"--- email {i} ---\nFrom: {e.get('sender', '')}\nTo: {e.get('to', '')}\n"
                  f"Date: {e.get('date', '')}\nSubject: {e.get('subject', '')}\n\n{body}\n")
         if total + len(block) > MAX_TOTAL_CHARS:

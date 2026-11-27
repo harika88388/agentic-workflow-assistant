@@ -557,7 +557,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173. The frontend calls `VITE_API_URL`, which defaults to `http://localhost:8000/api`.
+`npm run dev` serves the frontend at http://localhost:5173 and opens it in your system default browser (Brave if Brave is set as the default). The frontend calls `VITE_API_URL`, which defaults to `http://localhost:8000/api`. Backend workflow, model, MCP, approval, and Google API activity is logged with timestamps and correlation IDs in the backend terminal; request contents and credentials are not logged.
 
 ---
 

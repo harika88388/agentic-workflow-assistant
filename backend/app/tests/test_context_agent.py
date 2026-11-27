@@ -114,6 +114,17 @@ def test_reference_scoped_to_named_sender():
     assert "message_id" not in r.entities
 
 
+@pytest.mark.parametrize("message", ["Who sent it?", "What time is the meeting?"])
+def test_email_detail_followups_reuse_the_last_email_instead_of_calendar(message):
+    context = ctx(memory={"last_email_id": "mail-1"}, )
+    context.history = [{"role": "assistant", "content": "Email from aacorner\nSubject: You are gay\n"
+                                                      "Summary: A meeting is scheduled tonight."}]
+    r = agent.enhance(ir(intent="get_events", service="calendar"), message, context)
+    assert r.intent == "read_email" and r.service == "gmail"
+    assert r.entities == {"message_id": "mail-1"}
+    assert "last email discussed" in r.notes[0]
+
+
 def test_new_unrelated_request_drops_pending_and_abandon_is_detected():
     pending = {"intent": "create_event", "service": "calendar", "entities": {"person": "Rahul"}, "awaiting": ["date"]}
     r = agent.enhance(ir(intent="search_emails", entities={"query": "invoice"}), "find invoice emails", ctx(pending=pending))

@@ -1,6 +1,9 @@
+import logging
+
 import httpx
 import pytest
 
+from app.core.logging_context import correlation_context
 from app.integrations.calendar.client import CalendarClient
 from app.integrations.errors import (
     GoogleAuthError, GoogleBadRequestError, GoogleConflictError, GoogleNotFoundError,
@@ -30,6 +33,21 @@ def test_sends_bearer_token_and_parses_json_and_204():
     http, _ = make(h)
     assert http.request("GET", "/x") == {"ok": 1} and http.request("DELETE", "/x") is None
     assert seen == ["Bearer tok", "Bearer tok"]
+
+
+def test_google_api_operation_log_has_correlation_without_request_secrets(caplog):
+    private_marker = "PRIVATE_EMAIL_BODY_MARKER"
+    http = GoogleHTTP(
+        "https://gmail.googleapis.com/gmail/v1/users/me",
+        lambda: "secret-access-token",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"id": "sent"})),
+    )
+    with correlation_context("request-42"), caplog.at_level(logging.INFO, logger="app.integrations.http"):
+        http.request("POST", "/messages/send", json={"body": private_marker})
+
+    assert "request_id=request-42" in caplog.text
+    assert "service=gmail" in caplog.text and "resource=messages" in caplog.text
+    assert "secret-access-token" not in caplog.text and private_marker not in caplog.text
 
 
 def test_get_retries_5xx_then_succeeds():

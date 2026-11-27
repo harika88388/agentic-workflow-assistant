@@ -99,7 +99,8 @@ def email_address(raw: str) -> str:
 
 
 def compact_email(m: dict[str, Any]) -> dict[str, Any]:
-    return {k: m.get(k, "") for k in ("id", "thread_id", "sender", "subject", "date", "internal_date", "snippet")}
+    return {k: m.get(k, "") for k in
+            ("id", "thread_id", "sender", "to", "cc", "subject", "date", "internal_date", "snippet")}
 
 
 def compact_event(e: dict[str, Any]) -> dict[str, Any]:

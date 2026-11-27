@@ -92,18 +92,22 @@ class ScriptedLLM:
 
     name = "openrouter"
 
-    def __init__(self, intents=(), summary=None, task=None):
+    def __init__(self, intents=(), summary=None, task=None, email_understanding=None):
         self.intents = list(intents)
-        self.summary, self.task = summary, task
+        self.summary, self.task, self.email_understanding = summary, task, email_understanding
         self.calls: list[dict] = []
 
     def complete(self, messages, *, model, temperature, max_tokens, json_mode=False):
         system = messages[0].content
-        role = ("intent" if "Intent Recognition" in system else "summary" if "Summarization" in system
-                else "task" if "Task Automation" in system else "other")
+        role = ("intent" if "Intent Recognition" in system else
+                "email_understanding" if "Email Understanding" in system else
+                "summary" if "Summarization" in system else
+                "task" if "Task Automation" in system else "other")
         self.calls.append({"role": role, "model": model, "messages": messages})
         if role == "intent":
             reply = self.intents.pop(0)
+        elif role == "email_understanding":
+            reply = self.email_understanding
         else:
             reply = self.summary if role == "summary" else self.task
         if isinstance(reply, Exception):

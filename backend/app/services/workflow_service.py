@@ -1,3 +1,5 @@
+import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -5,12 +7,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.logging_context import current_correlation_id
 from app.database.models import Conversation, User, WorkflowExecution
 from app.integrations.calendar.service import CalendarService
 from app.integrations.gmail.service import GmailService
 
 GMAIL_INTENTS = {"send_email", "create_draft", "reply_email"}
 CALENDAR_INTENTS = {"create_event", "reschedule_event", "cancel_event"}
+log = logging.getLogger(__name__)
 
 
 def _owned_workflow(db: Session, user: User, execution_id: uuid.UUID) -> WorkflowExecution:
@@ -37,6 +41,8 @@ def propose(db: Session, user: User, *, conversation_id: uuid.UUID, service: str
         WorkflowExecution.user_id == user.id, WorkflowExecution.idempotency_key == idempotency_key
     ))
     if existing is not None:
+        log.info("approval request reused request_id=%s workflow_id=%s status=%s",
+                 current_correlation_id(), existing.id, existing.status)
         return existing
     execution = WorkflowExecution(
         user_id=user.id, conversation_id=conversation_id, service=service, intent=intent,
@@ -45,6 +51,8 @@ def propose(db: Session, user: User, *, conversation_id: uuid.UUID, service: str
     db.add(execution)
     db.commit()
     db.refresh(execution)
+    log.info("approval requested request_id=%s workflow_id=%s service=%s intent=%s",
+             current_correlation_id(), execution.id, service, intent)
     return execution
 
 
@@ -55,6 +63,8 @@ def reject(db: Session, user: User, execution_id: uuid.UUID) -> WorkflowExecutio
     execution.status = "rejected"
     db.commit()
     db.refresh(execution)
+    log.info("approval outcome request_id=%s workflow_id=%s status=rejected",
+             current_correlation_id(), execution.id)
     return execution
 
 
@@ -67,11 +77,14 @@ def _result(value: Any) -> dict[str, Any]:
 
 def execute(db: Session, user: User, execution_id: uuid.UUID, *, gmail: GmailService | None = None,
             calendar: CalendarService | None = None) -> WorkflowExecution:
+    started = time.perf_counter()
     execution = _owned_workflow(db, user, execution_id)
     if execution.status != "awaiting_approval":
         raise ValueError("workflow is no longer awaiting approval")
     execution.status = "running"
     db.commit()
+    log.info("workflow execution started request_id=%s workflow_id=%s service=%s intent=%s",
+             current_correlation_id(), execution.id, execution.service, execution.intent)
     payload = execution.request or {}
     try:
         if execution.service == "gmail":
@@ -106,6 +119,13 @@ def execute(db: Session, user: User, execution_id: uuid.UUID, *, gmail: GmailSer
         execution.status = "failed"
         execution.error = str(exc)
         execution.result = None
+        log.error("workflow execution failed request_id=%s workflow_id=%s service=%s intent=%s "
+                  "exception_type=%s duration_ms=%d", current_correlation_id(), execution.id,
+                  execution.service, execution.intent, type(exc).__name__,
+                  round((time.perf_counter() - started) * 1000))
     db.commit()
     db.refresh(execution)
+    if execution.status == "succeeded":
+        log.info("approval outcome request_id=%s workflow_id=%s status=succeeded duration_ms=%d",
+                 current_correlation_id(), execution.id, round((time.perf_counter() - started) * 1000))
     return execution

@@ -28,6 +28,11 @@ _EMAIL_REF = re.compile(
     r"\b(it|that|this|same|latest|last|newest|most recent|first|second|third|oldest|previous)\b", re.I)
 _TIME_SPAN = re.compile(r"\b(last|past|previous|this)\s+(week|month|year|few \w+|couple of \w+|\d+ \w+)\b", re.I)
 _EVENT_REF = re.compile(r"\b(it|that|this|(that|this|the|same) (meeting|event|call|appointment|one))\b", re.I)
+_EMAIL_DETAIL_FOLLOWUP = re.compile(
+    r"\bwho sent (?:it|that|this)|\bwho is the sender\b|\bwhat time\b|\bwhat date\b|"
+    r"\bwhen (?:is|was|did|does)\b|\bexact time\b|\bdid it mention\b",
+    re.I,
+)
 _ABANDON = re.compile(r"^\s*(never ?mind|forget (it|that)|cancel that|stop|nothing|no thanks?)\b", re.I)
 _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3, "fifth": 4}
 _STOP = {"the", "a", "an", "one", "with", "my", "meeting", "event", "email", "mail", "message", "about", "that",
@@ -159,7 +164,18 @@ class ContextEnhancementAgent:
         notes: list[str] = []
         new = ir.entities.model_dump(exclude_none=True)
         new = {k: v for k, v in new.items() if v not in ([], "")}
-        if continued:
+        recent_assistant_message = next((h["content"] for h in reversed(ctx.history) if h["role"] == "assistant"), "")
+        email_followup = (
+            not pending
+            and memory.get("last_email_id")
+            and "email from " in recent_assistant_message.casefold()
+            and _EMAIL_DETAIL_FOLLOWUP.search(message)
+        )
+        if email_followup:
+            intent = "read_email"
+            entities = {"message_id": memory["last_email_id"]}
+            notes.append("email follow-up resolved to the last email discussed")
+        elif continued:
             assert pending is not None
             intent = pending["intent"]
             entities = {**(pending.get("entities") or {}), **new}
@@ -190,7 +206,8 @@ class ContextEnhancementAgent:
         self._resolve_references(intent, message, entities, memory, notes)
 
         req = EnhancedRequest(service, intent, entities, continued_pending=continued, notes=notes)
-        if not continued and ir.requires_clarification and ir.clarification_question and ir.intent != "unknown":
+        if not continued and not email_followup and ir.requires_clarification and ir.clarification_question \
+                and ir.intent != "unknown":
             req.llm_question = ir.clarification_question
         if intent in CALENDAR_INTENTS and entities.get("date"):
             text = str(entities["date"])

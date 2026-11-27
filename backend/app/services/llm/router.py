@@ -1,19 +1,26 @@
 """Role-based model routing. One model can serve every role; each role can be overridden independently by env."""
+import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 
 from app.core.config import Settings
+from app.core.logging_context import current_correlation_id
 from app.services.llm.base import ChatMessage, LLMConfigError, LLMProvider
 
 
 class LLMRole(str, Enum):
     INTENT = "intent"
     SUMMARIZATION = "summarization"
+    EMAIL_UNDERSTANDING = "email_understanding"
     TASK = "task_automation"
 
 
-_PREFIX = {LLMRole.INTENT: "intent", LLMRole.SUMMARIZATION: "summary", LLMRole.TASK: "task"}
-_TEMPERATURE = {LLMRole.INTENT: 0.1, LLMRole.SUMMARIZATION: 0.3, LLMRole.TASK: 0.1}
+_PREFIX = {LLMRole.INTENT: "intent", LLMRole.SUMMARIZATION: "summary",
+           LLMRole.EMAIL_UNDERSTANDING: "summary", LLMRole.TASK: "task"}
+_TEMPERATURE = {LLMRole.INTENT: 0.1, LLMRole.SUMMARIZATION: 0.3,
+                LLMRole.EMAIL_UNDERSTANDING: 0.2, LLMRole.TASK: 0.1}
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,20 @@ class LLMRouter:
 
     def complete(self, role: LLMRole, messages: list[ChatMessage], *, json_mode: bool = False) -> str:
         cfg = self.config_for(role)
-        return self._provider(cfg.provider).complete(
-            messages, model=cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_tokens,
-            json_mode=json_mode and cfg.json_mode)
+        request_id = current_correlation_id()
+        started = time.perf_counter()
+        log.info("LLM provider selected request_id=%s role=%s provider=%s model=%s",
+                 request_id, role.value, cfg.provider, cfg.model)
+        try:
+            result = self._provider(cfg.provider).complete(
+                messages, model=cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_tokens,
+                json_mode=json_mode and cfg.json_mode)
+        except Exception as exc:
+            log.error("LLM execution failed request_id=%s role=%s provider=%s model=%s exception_type=%s "
+                      "duration_ms=%d", request_id, role.value, cfg.provider, cfg.model, type(exc).__name__,
+                      round((time.perf_counter() - started) * 1000))
+            raise
+        log.info("LLM execution completed request_id=%s role=%s provider=%s model=%s status=success duration_ms=%d",
+                 request_id, role.value, cfg.provider, cfg.model,
+                 round((time.perf_counter() - started) * 1000))
+        return result
