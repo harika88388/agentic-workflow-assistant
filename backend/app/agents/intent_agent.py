@@ -19,12 +19,28 @@ _EMAIL_SENDER = re.compile(
     r"\bfrom\s+(?!my\b|your\b|the\b|a\b|an\b)([a-z0-9_%+-]+(?:\.[a-z0-9_%+-]+)*(?:@[a-z0-9.-]+)?)\b",
     re.I,
 )
-_EMAIL_TOPIC = re.compile(r"\babout\s+(.+?)(?:[?.!,]|$)", re.I)
+# "Did aa3corner@gmail.com email me about ...": the sender is the grammatical subject. Up to three name words.
+_NOT_A_SENDER = r"(?:i|you|we|they|he|she|it|my|your|our|his|her|their|the|a|an|any|anyone|anybody|someone|somebody|nobody|everyone)\b"
+_SENDER_WORD = r"[a-z0-9_%+-]+(?:\.[a-z0-9_%+-]+)*(?:@[a-z0-9.-]+)?"
+_SUBJECT_SENDER = re.compile(
+    rf"\b(?:did|has|have)\s+(?!{_NOT_A_SENDER})({_SENDER_WORD}(?:\s+(?!{_NOT_A_SENDER}){_SENDER_WORD}){{0,2}}?)\s+"
+    r"(?:e-?mail(?:ed)?|mail(?:ed)?|sen[dt]|wr[io]te|written|repl(?:y|ied))\b",
+    re.I,
+)
+_EMAIL_TOPIC = re.compile(r"\b(?:about|regarding|concerning)\s+(.+?)(?:[?.!,]|$)", re.I)
+# After a sender, looser connectives also introduce the topic: "mails from X for a meeting tonight".
+_SENDER_TOPIC = re.compile(r"\b(?:about|regarding|concerning|for|on|re:?)\s+(.+?)(?:[?.!,]|$)", re.I)
 _EMAIL_SUMMARY = re.compile(r"\b(?:summari[sz](?:e|es|ed|ing)|summary)\b", re.I)
-_EMAIL_RECEIVED = re.compile(r"\b(?:did\s+i\s+receive|have\s+i\s+received|any\s+e-?mails?\s+(?:about|from))\b", re.I)
+_EMAIL_RECEIVED = re.compile(
+    r"\b(?:did\s+i\s+(?:receive|get)|have\s+i\s+(?:received|got|gotten)|do\s+i\s+have"
+    r"|any\s+(?:e-?)?mails?\s+(?:about|from|regarding))\b", re.I)
+# Words that narrow a Gmail search to nothing without adding meaning; the bodies are read to answer the question.
+_TOPIC_FILLER = {"a", "an", "the", "any", "some", "my", "me", "it", "this", "that", "is", "was", "be", "been", "for",
+                 "of", "to", "on", "in", "at", "and", "or", "scheduled", "schedule", "planned", "tonight", "today",
+                 "tomorrow", "yesterday", "recently", "lately"}
 _EMAIL_SEARCH = re.compile(r"\b(?:find|search|look\s+for)\b.*\b(?:e-?mails?|messages?)\b", re.I)
 _EMAIL_READ = re.compile(
-    r"\b(?:what|who|when|where|does|did|is|are)\b.*\b(?:e-?mail|mail|inbox)\b"
+    r"\b(?:what|who|when|where|does|did|is|are)\b.*\b(?:e-?mails?|mails?|inbox)\b"
     r"|\b(?:read|open|show)\s+(?:me\s+)?(?:the\s+)?(?:latest\s+)?e-?mail\b",
     re.I,
 )
@@ -34,17 +50,23 @@ def _direct_email_intent(message: str) -> IntentResult | None:
     """Keep clear email-reading requests out of composition intents without relying on model classification."""
     if not _EMAIL_WORD.search(message):
         return None
-    sender = _EMAIL_SENDER.search(message)
-    topic = _EMAIL_TOPIC.search(message)
+    subject_sender = None
+    sender = _EMAIL_SENDER.search(message) or (subject_sender := _SUBJECT_SENDER.search(message))
+    topic = (_SENDER_TOPIC.search(message, sender.end()) if sender else None) or _EMAIL_TOPIC.search(message)
     topic_query = topic.group(1).strip().strip('"') if topic else ""
     topic_query = re.sub(r"^(?:a|an|the)\s+", "", topic_query, flags=re.I)
-    query = f"from:{sender.group(1)}" if sender else topic_query
+    if sender:
+        name = sender.group(1)
+        keywords = [w for w in re.findall(r"[\w'-]+", topic_query) if w.casefold() not in _TOPIC_FILLER][:3]
+        query = " ".join([f'from:"{name}"' if " " in name else f"from:{name}", *keywords])
+    else:
+        query = topic_query
 
     if _EMAIL_SUMMARY.search(message):
         query = query or ("in:inbox" if re.search(r"\b(latest|newest|most recent)\b", message, re.I) else "")
         if query:
             return IntentResult(service="gmail", intent="summarize_emails", entities={"query": query}).enforce_requirements()
-    if _EMAIL_RECEIVED.search(message) or _EMAIL_SEARCH.search(message):
+    if subject_sender or _EMAIL_RECEIVED.search(message) or _EMAIL_SEARCH.search(message):
         if query:
             return IntentResult(service="gmail", intent="search_emails", entities={"query": query}).enforce_requirements()
     if _EMAIL_READ.search(message):

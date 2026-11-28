@@ -99,6 +99,8 @@ class MCPGateway:
                 raise MCPToolError("mcp_connection_failed", f"Could not connect to the {server} MCP server.",
                                    server=server) from exc
             self._clients[server] = client
+            log.info("mcp server connected request_id=%s server=%s transport=%s",
+                     current_correlation_id(), server, self.transport)
         return self._clients[server]
 
     def list_tools(self, server: str) -> list[ToolInfo]:

@@ -26,6 +26,9 @@ def ctx(memory=None, pending=None):
     ("Friday", date(2026, 11, 27)), ("next Monday", date(2026, 11, 30)), ("Tuesday", date(2026, 12, 1)),
     ("this Tuesday", date(2026, 11, 24)), ("28 Nov", date(2026, 11, 28)), ("January 5", date(2027, 1, 5)),
     ("2026-12-03", date(2026, 12, 3)), ("in 3 days", date(2026, 11, 27)), ("next week", date(2026, 11, 30)),
+    ("yesterday", date(2026, 11, 23)), ("last night", date(2026, 11, 23)), ("day before yesterday", date(2026, 11, 22)),
+    ("3 days ago", date(2026, 11, 21)), ("last Friday", date(2026, 11, 20)), ("last Tuesday", date(2026, 11, 17)),
+    ("previous Monday", date(2026, 11, 23)),
 ])
 def test_resolve_date(text, expected):
     assert resolve_date(text, REF) == expected
@@ -135,6 +138,15 @@ def test_new_unrelated_request_drops_pending_and_abandon_is_detected():
 def test_unresolvable_date_is_flagged_not_guessed():
     r = agent.enhance(ir(intent="check_availability", entities={"date": "sometime soon"}), "am I free sometime soon", ctx())
     assert r.date_unresolved and "date" not in r.entities
+
+
+def test_a_lookup_date_left_in_the_query_is_taken_from_the_message():
+    r = agent.enhance(ir(intent="get_events", service="calendar", entities={"query": "meetings tomorrow"}),
+                      "What meetings do I have tomorrow?", ctx())
+    assert r.entities["date"] == "2026-11-25" and r.date_text == "What meetings do I have tomorrow?"
+    r = agent.enhance(ir(intent="get_events", service="calendar", entities={"query": "meetings"}),
+                      "What meetings do I have coming up?", ctx())
+    assert "date" not in r.entities and not r.date_unresolved
 
 
 # ---- retrieval from the database is per conversation ----

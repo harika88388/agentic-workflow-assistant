@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic import BaseModel, Field
 
 from app.agents.intent_agent import MAX_MESSAGE_CHARS
@@ -14,6 +16,7 @@ class ChatTurnOut(BaseModel):
     user_message: MessageOut
     assistant_message: MessageOut
     workflow: WorkflowOut | None = None
+    execution_id: uuid.UUID | None = None
 
 
 class DecisionOut(BaseModel):

@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,12 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_mcp_gateway_factory
-from app.core.logging_context import correlation_context
+from app.core.logging_context import bind
 from app.database.models import User, WorkflowExecution
 from app.database.session import get_db
 from app.mcp.executors import MCPCalendarExecutor, MCPGmailExecutor
 from app.schemas.workflow import WorkflowCreate, WorkflowDecision, WorkflowOut
-from app.services import auth_service, workflow_service
+from app.services import auth_service, execution_history, workflow_service
 from app.workflows import chat_service
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -51,24 +52,32 @@ def decide_workflow(execution_id: uuid.UUID, body: WorkflowDecision = WorkflowDe
                     user: User = Depends(get_current_user), db: Session = Depends(get_db),
                     gateway_factory: chat_service.GatewayFactory = Depends(get_mcp_gateway_factory)):
     """Approve (execute through the Gmail/Calendar MCP servers) or reject a proposed action."""
+    started = time.perf_counter()
     try:
         existing = workflow_service._owned_workflow(db, user, execution_id)
-        with correlation_context(str(existing.id)):
-            log.info("approval decision requested workflow_id=%s decision=%s",
-                     existing.id, "approved" if body.approve else "rejected")
-            try:
-                if not body.approve:
-                    execution = workflow_service.reject(db, user, execution_id)
-                else:
-                    _require_connected(db, user, existing)
-                    with gateway_factory(db, user) as gateway:
+        bind(workflow_id=str(existing.id))
+        log.info("approval decision requested workflow_id=%s decision=%s",
+                 existing.id, "approved" if body.approve else "rejected")
+        calls: list[dict] = []
+        try:
+            if not body.approve:
+                execution = workflow_service.reject(db, user, execution_id)
+            else:
+                _require_connected(db, user, existing)
+                with gateway_factory(db, user) as gateway:
+                    try:
                         execution = workflow_service.execute(db, user, execution_id, gmail=MCPGmailExecutor(gateway),
                                                              calendar=MCPCalendarExecutor(gateway))
-                chat_service.record_decision(db, execution)
-                log.info("approval decision completed workflow_id=%s status=%s", execution.id, execution.status)
-            except HTTPException as exc:
-                log.warning("approval decision blocked workflow_id=%s http_status=%s", existing.id, exc.status_code)
-                raise
+                    finally:
+                        calls = list(gateway.calls)
+            chat_service.record_decision(db, execution)
+            execution_history.record_decision(db, execution, approved=body.approve, mcp_calls=calls,
+                                              duration_ms=round((time.perf_counter() - started) * 1000))
+            log.info("approval decision completed workflow_id=%s status=%s duration_ms=%d", execution.id,
+                     execution.status, round((time.perf_counter() - started) * 1000))
+        except HTTPException as exc:
+            log.warning("approval decision blocked workflow_id=%s http_status=%s", existing.id, exc.status_code)
+            raise
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return execution
@@ -78,11 +87,12 @@ def decide_workflow(execution_id: uuid.UUID, body: WorkflowDecision = WorkflowDe
 def reject_workflow(execution_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         existing = workflow_service._owned_workflow(db, user, execution_id)
-        with correlation_context(str(existing.id)):
-            log.info("approval decision requested workflow_id=%s decision=rejected", existing.id)
-            execution = workflow_service.reject(db, user, execution_id)
-            chat_service.record_decision(db, execution)
-            log.info("approval decision completed workflow_id=%s status=%s", execution.id, execution.status)
+        bind(workflow_id=str(existing.id))
+        log.info("approval decision requested workflow_id=%s decision=rejected", existing.id)
+        execution = workflow_service.reject(db, user, execution_id)
+        chat_service.record_decision(db, execution)
+        execution_history.record_decision(db, execution, approved=False)
+        log.info("approval decision completed workflow_id=%s status=%s", execution.id, execution.status)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return execution

@@ -230,8 +230,10 @@ def test_llm_not_configured_is_reported_and_pending_request_survives(env, db_ses
     env.say("Email a@example.com")
     t = env.say("say hello")
     assert t["status"] == "failed" and "isn't configured" in t["assistant_message"]["content"]
-    assert t["assistant_message"]["meta"]["trace"][-2] == {"node": "recognize_intent", "status": "error",
-                                                           "detail": "llm_not_configured"}
+    failed_step = t["assistant_message"]["meta"]["trace"][-2]
+    assert {k: v for k, v in failed_step.items() if k != "ms"} == {"node": "recognize_intent", "status": "error",
+                                                                   "detail": "llm_not_configured"}
+    assert isinstance(failed_step["ms"], int)
     sc = db_session.query(SessionContext).one()
     assert sc.pending_intent["intent"] == "send_email"
 

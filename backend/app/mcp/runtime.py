@@ -4,7 +4,6 @@ Tokens are loaded (and refreshed) from the encrypted credential store inside the
 through MCP messages. A stdio server learns WHICH user it serves from the MCP_USER_ID environment variable set by
 the backend when it spawns the process.
 """
-import logging
 import os
 import sys
 import uuid
@@ -14,6 +13,7 @@ from contextlib import contextmanager
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy.orm import Session
 
+from app.core.log_config import configure_logging
 from app.core.logging_context import correlation_context
 from app.integrations.calendar.client import CalendarClient
 from app.integrations.calendar.service import CalendarService
@@ -91,8 +91,7 @@ def stdio_calendar_scope(user_id: uuid.UUID) -> CalendarScope:
 
 def run_stdio_server(build: Callable[[uuid.UUID], MCPServer]) -> None:
     # stdout carries the MCP protocol: all logging must go to stderr.
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging(stream=sys.stderr)
     try:
         user_id = uuid.UUID(os.environ[USER_ENV])
     except (KeyError, ValueError):

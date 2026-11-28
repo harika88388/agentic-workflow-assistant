@@ -1,5 +1,6 @@
 """Calendar operations. Nothing is reported as done unless Google Calendar confirms it by re-reading."""
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from app.integrations.calendar.timeutil import (
 )
 from app.integrations.errors import GoogleConflictError, GoogleNotFoundError
 
+log = logging.getLogger(__name__)
 
 class CalendarError(Exception):
     pass
@@ -67,11 +69,16 @@ class CalendarService:
     # --- read ---
     def list_events(self, days: int = 7, query: str | None = None, max_results: int = 50) -> list[CalendarEvent]:
         now = self._now()
-        return self.client.list_events(now, now + timedelta(days=days), q=query, max_results=max_results)
+        events = self.client.list_events(now, now + timedelta(days=days), q=query, max_results=max_results)
+        log.info("calendar event search completed window_days=%d has_query=%s result_count=%d",
+                 days, bool(query), len(events))
+        return events
 
     def events_on(self, d: date) -> list[CalendarEvent]:
         s, e = day_bounds(d, self.tz)
-        return self.client.list_events(s, e)
+        events = self.client.list_events(s, e)
+        log.info("calendar event search completed on_date=%s result_count=%d", d.isoformat(), len(events))
+        return events
 
     def next_event(self) -> CalendarEvent | None:
         for ev in self.client.list_events(self._now(), None, max_results=10):
@@ -86,6 +93,8 @@ class CalendarService:
         busy = self.client.freebusy(start, end, self.tz.key)
         slots = compute_free_slots(busy, start, end, min_slot_minutes)
         fmt = lambda a, b: (a.astimezone(self.tz).isoformat(), b.astimezone(self.tz).isoformat())  # noqa: E731
+        log.info("calendar availability checked window_minutes=%d is_free=%s busy_blocks=%d free_slots=%d",
+                 round((end - start).total_seconds() / 60), not busy, len(busy), len(slots))
         return Availability(not busy, [fmt(s, e) for s, e in busy], [fmt(s, e) for s, e in slots])
 
     def find_event(self, *, person: str | None = None, title: str | None = None, on_date: date | None = None,
@@ -135,7 +144,10 @@ class CalendarService:
         verified = (fetched.status != "cancelled" and fetched.summary == body["summary"]
                     and same_instant(parse_iso(fetched.start, self.tz), start))  # type: ignore[arg-type]
         if not verified:
+            log.error("calendar event creation not verified event_id=%s", created.id)
             raise CalendarVerificationError("Google Calendar did not confirm the event was created as requested.")
+        log.info("calendar event created event_id=%s attendees=%d duplicate=%s verified=true",
+                 fetched.id, len(emails), duplicate)
         return CreateResult(fetched, duplicate, True)
 
     def reschedule_event(self, event_id: str, new_start: datetime, new_end: datetime | None = None,
@@ -154,7 +166,9 @@ class CalendarService:
         after = self.client.get_event(event_id)
         if not (same_instant(parse_iso(after.start, self.tz), new_start)  # type: ignore[arg-type]
                 and same_instant(parse_iso(after.end, self.tz), new_end)):  # type: ignore[arg-type]
+            log.error("calendar event update not verified event_id=%s", event_id)
             raise CalendarVerificationError("Google Calendar did not confirm the new time.")
+        log.info("calendar event rescheduled event_id=%s verified=true", event_id)
         return RescheduleResult(after, ev.start, ev.end, True)
 
     def cancel_event(self, event_id: str, send_updates: str = "none") -> CancelResult:
@@ -167,7 +181,9 @@ class CalendarService:
         except GoogleNotFoundError:
             gone = True
         if not gone:
+            log.error("calendar event cancellation not verified event_id=%s", event_id)
             raise CalendarVerificationError("Google Calendar did not confirm the event was deleted.")
+        log.info("calendar event cancelled event_id=%s verified=true", event_id)
         return CancelResult(ev, True)
 
     def _when(self, dt: datetime) -> dict:

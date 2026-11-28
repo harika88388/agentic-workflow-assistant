@@ -1,6 +1,7 @@
 """Shared fakes: real GmailService/CalendarService over fake Google clients, a role-aware fake LLM, and an in-process
 MCP gateway factory. No network, no credentials."""
 import json
+import re
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -36,10 +37,14 @@ class FakeGmailClient:
             body_text=body, message_id_header=f"<{id}@mail>")
 
     def search(self, query, max_results=10):
+        """AND of the words (from: matches anywhere, other operators are ignored); `{a b}` means a OR b."""
         self.searches.append(query)
-        words = [w.strip('"').casefold() for w in query.replace("from:", "").split() if ":" not in w]
+        groups = [g.split() for g in re.findall(r"\{([^}]*)\}", query)]
+        rest = re.sub(r"\{[^}]*\}", " ", query).replace("from:", "")
+        words = [w.strip('"').casefold() for w in rest.split() if ":" not in w]
+        text = lambda m: (m.sender + " " + m.subject + " " + m.body_text).casefold()  # noqa: E731
         hits = [m for m in self.messages.values()
-                if all(w in (m.sender + " " + m.subject + " " + m.body_text).casefold() for w in words)]
+                if all(w in text(m) for w in words) and all(any(w.casefold() in text(m) for w in g) for g in groups)]
         hits.sort(key=lambda m: m.internal_date or "", reverse=True)
         return [EmailMessageData(**{**m.__dict__, "body_text": ""}) for m in hits[:max_results]]
 
@@ -92,20 +97,24 @@ class ScriptedLLM:
 
     name = "openrouter"
 
-    def __init__(self, intents=(), summary=None, task=None, email_understanding=None):
+    def __init__(self, intents=(), summary=None, task=None, email_understanding=None, email_answer=None):
         self.intents = list(intents)
         self.summary, self.task, self.email_understanding = summary, task, email_understanding
+        self.email_answer = email_answer  # a reply, or a callable(messages) -> reply
         self.calls: list[dict] = []
 
     def complete(self, messages, *, model, temperature, max_tokens, json_mode=False):
         system = messages[0].content
         role = ("intent" if "Intent Recognition" in system else
+                "email_answer" if "Email Question Answering" in system else
                 "email_understanding" if "Email Understanding" in system else
                 "summary" if "Summarization" in system else
                 "task" if "Task Automation" in system else "other")
         self.calls.append({"role": role, "model": model, "messages": messages})
         if role == "intent":
             reply = self.intents.pop(0)
+        elif role == "email_answer":
+            reply = self.email_answer(messages) if callable(self.email_answer) else self.email_answer
         elif role == "email_understanding":
             reply = self.email_understanding
         else:

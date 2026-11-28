@@ -22,7 +22,8 @@ def _safe(y: int, m: int, d: int) -> date | None:
 def resolve_date(text: str | None, ref: date) -> date | None:
     """Return the calendar date meant by `text`, or None if it cannot be determined unambiguously.
 
-    A bare or 'next' weekday means its next occurrence after today; 'this <weekday>' may be today.
+    A bare or 'next' weekday means its next occurrence after today; 'this <weekday>' may be today;
+    'last <weekday>' means its most recent occurrence before today.
     A day/month without a year means its next occurrence on or after today."""
     if not text:
         return None
@@ -37,15 +38,24 @@ def resolve_date(text: str | None, ref: date) -> date | None:
 def _relative(s: str, ref: date) -> date | None:
     if re.search(r"\bday after tomorrow\b", s):
         return ref + timedelta(days=2)
+    if re.search(r"\bday before yesterday\b", s):
+        return ref - timedelta(days=2)
     if re.search(r"\b(today|tonight|this (morning|afternoon|evening))\b", s):
         return ref
     if re.search(r"\btomorrow\b", s):
         return ref + timedelta(days=1)
+    if re.search(r"\b(yesterday|last night)\b", s):
+        return ref - timedelta(days=1)
     if m := re.search(r"\bin (\d{1,3}) days?\b", s):
         return ref + timedelta(days=int(m.group(1)))
+    if m := re.search(r"\b(\d{1,3}) days? ago\b", s):
+        return ref - timedelta(days=int(m.group(1)))
+    weekdays = "|".join(sorted(_WD, key=len, reverse=True))
     if re.search(r"\bnext week\b", s) and not any(w in s for w in _WD):
         return ref + timedelta(days=7 - ref.weekday())  # Monday of next week
-    if m := re.search(r"\b(this|next|coming)?\s*(" + "|".join(sorted(_WD, key=len, reverse=True)) + r")\b", s):
+    if m := re.search(rf"\b(last|past|previous)\s+({weekdays})\b", s):
+        return ref - timedelta(days=(ref.weekday() - _WD[m.group(2)]) % 7 or 7)
+    if m := re.search(r"\b(this|next|coming)?\s*(" + weekdays + r")\b", s):
         target = _WD[m.group(2)]
         delta = (target - ref.weekday()) % 7
         if delta == 0 and m.group(1) != "this":
@@ -74,3 +84,10 @@ def extract_time(text: str | None) -> str | None:
         return None
     m = _TIME_RE.search(text)
     return normalize_time(m.group(1).replace(" ", "")) if m else None
+
+
+def extract_times(text: str | None) -> set[str]:
+    """Every clock time in free text, normalized to HH:MM."""
+    if not text:
+        return set()
+    return {t for m in _TIME_RE.finditer(text) if (t := normalize_time(m.group(1).replace(" ", "")))}

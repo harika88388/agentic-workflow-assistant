@@ -1,4 +1,5 @@
 """Gmail operations with post-action verification. Each write confirms against Gmail before reporting success."""
+import logging
 from dataclasses import dataclass
 from email.utils import parseaddr
 
@@ -12,6 +13,9 @@ from app.integrations.gmail.mime import (
     reply_subject,
     validate_address,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class GmailOperationError(Exception):
@@ -60,7 +64,10 @@ class GmailService:
     ) -> SendResult:
         raw = build_raw_message(to=to, subject=subject, body=body, cc=cc, bcc=bcc)
         sent = self.client.send_raw(raw)
-        return self._verify_sent(sent, [validate_address(a) for a in to], subject or "(no subject)", None)
+        result = self._verify_sent(sent, [validate_address(a) for a in to], subject or "(no subject)", None)
+        log.info("gmail send completed message_id=%s recipients=%d verified=%s note=%s",
+                 result.id, len(to) + len(cc or []) + len(bcc or []), result.verified, result.note or "-")
+        return result
 
     def reply_email(self, body: str, *, message_id: str | None = None, thread_id: str | None = None) -> SendResult:
         if not (message_id or thread_id):
@@ -77,18 +84,23 @@ class GmailService:
             to=[recipient], subject=subject, body=body, in_reply_to=in_reply_to, references=references
         )
         sent = self.client.send_raw(raw, thread_id=thread.id)
-        return self._verify_sent(sent, [recipient], subject, thread.id)
+        result = self._verify_sent(sent, [recipient], subject, thread.id)
+        log.info("gmail reply completed message_id=%s thread_id=%s verified=%s note=%s",
+                 result.id, result.thread_id, result.verified, result.note or "-")
+        return result
 
     def create_draft(self, to: list[str], subject: str, body: str, thread_id: str | None = None) -> DraftResult:
         raw = build_raw_message(to=to, subject=subject, body=body)
         d = self.client.create_draft_raw(raw, thread_id)
         draft_id = d.get("id")
         if not draft_id:
+            log.error("gmail draft creation returned no draft id")
             raise GmailOperationError("Gmail did not return a draft id")
         try:
             verified = self.client.draft_exists(draft_id)
         except GoogleAPIError:
             verified = False
+        log.info("gmail draft created draft_id=%s recipients=%d verified=%s", draft_id, len(to), verified)
         msg = d.get("message") or {}
         return DraftResult(draft_id, msg.get("id", ""), msg.get("threadId", ""),
                            [validate_address(a) for a in to], subject or "(no subject)", verified)

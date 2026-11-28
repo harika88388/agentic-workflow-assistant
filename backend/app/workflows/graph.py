@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.base import AgentContext, AgentOutcome
 from app.agents.service_selector import ServiceSelection
-from app.core.logging_context import current_correlation_id
+from app.core.logging_context import current_context, current_correlation_id
 from app.database.models import Message
 from app.mcp.errors import MCPToolError
 from app.schemas.intent import QUESTIONS, IntentResult
@@ -53,30 +53,60 @@ def classify_error(exc: Exception) -> tuple[str, str]:
     return "internal_error", "Something went wrong while processing your request."
 
 
+NODE_LABELS = {
+    "load_context": "Loading conversation context",
+    "select_service": "Choosing Gmail or Calendar",
+    "recognize_intent": "Understanding your request",
+    "enhance_context": "Resolving references and dates",
+    "validate_parameters": "Checking required details",
+    "gmail_agent": "Gmail agent working",
+    "calendar_agent": "Calendar agent working",
+    "mcp_tools": "Calling Google tools",
+    "request_approval": "Preparing approval request",
+    "generate_response": "Writing the response",
+    "persist_turn": "Saving the conversation",
+}
+TOOL_LABELS = {
+    "search_emails": "Searching Gmail", "read_email": "Reading the full email", "get_email_thread": "Reading the thread",
+    "list_events": "Checking your calendar", "get_event": "Loading the event",
+    "check_availability": "Checking availability",
+}
+
+
 def node(name: str) -> Callable:
-    """Wrap a node: inject deps, record its execution status in `trace`, and turn exceptions into `error`."""
+    """Wrap a node: inject deps, record its execution status and duration in `trace`, emit a progress event, and turn
+    exceptions into `error`."""
     def deco(fn: Callable[[WorkflowState, WorkflowDeps], dict[str, Any]]):
         # No functools.wraps: LangGraph inspects the signature to decide whether to pass `config`.
         def wrapper(state: WorkflowState, config: RunnableConfig) -> dict[str, Any]:
             deps: WorkflowDeps = config["configurable"]["deps"]
             trace = state.get("trace", [])
             previous_node = trace[-1]["node"] if trace else "START"
-            request_id = state.get("message_id", current_correlation_id())
+            request_id = current_correlation_id()
+            if request_id == "-":
+                request_id = state.get("message_id", "-")
             started = time.perf_counter()
             log.info("workflow transition request_id=%s from=%s to=%s", request_id, previous_node, name)
+            deps.progress({"type": "progress", "node": name, "status": "running", "label": NODE_LABELS.get(name, name)})
             try:
                 update = fn(state, deps) or {}
             except Exception as exc:  # noqa: BLE001 - every failure becomes an explicit, reported error
                 code, message = classify_error(exc)
+                ms = round((time.perf_counter() - started) * 1000)
                 log.error("workflow node failed request_id=%s node=%s code=%s exception_type=%s duration_ms=%d",
-                          request_id, name, code, type(exc).__name__,
-                          round((time.perf_counter() - started) * 1000))
+                          request_id, name, code, type(exc).__name__, ms,
+                          exc_info=code == "internal_error")
+                deps.progress({"type": "progress", "node": name, "status": "error", "detail": code, "ms": ms,
+                               "label": NODE_LABELS.get(name, name)})
                 return {"status": "failed", "error": {"code": code, "message": message, "node": name},
-                        "trace": [{"node": name, "status": "error", "detail": code}]}
+                        "trace": [{"node": name, "status": "error", "detail": code, "ms": ms}]}
             detail = update.pop("detail", None)
-            log.info("workflow node completed request_id=%s node=%s status=ok duration_ms=%d",
-                     request_id, name, round((time.perf_counter() - started) * 1000))
-            return {**update, "trace": [{"node": name, "status": "ok", **({"detail": detail} if detail else {})}]}
+            ms = round((time.perf_counter() - started) * 1000)
+            log.info("workflow node completed request_id=%s node=%s status=ok duration_ms=%d", request_id, name, ms)
+            deps.progress({"type": "progress", "node": name, "status": "ok", "ms": ms,
+                           "label": NODE_LABELS.get(name, name), **({"detail": detail} if detail else {})})
+            return {**update, "trace": [{"node": name, "status": "ok", "ms": ms,
+                                         **({"detail": detail} if detail else {})}]}
         wrapper.__name__ = name
         return wrapper
     return deco
@@ -190,7 +220,12 @@ def mcp_tools(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
     results = dict(state.get("tool_results") or {})
     calls = state["outcome"]["tool_calls"]
     for call in calls:
+        d.progress({"type": "tool", "server": call["server"], "tool": call["tool"], "status": "running",
+                    "label": TOOL_LABELS.get(call["tool"], f"{call['server']}.{call['tool']}")})
         results[call["key"]] = d.gateway.call_tool(call["server"], call["tool"], call["arguments"])
+        last = d.gateway.calls[-1] if d.gateway.calls else {}
+        d.progress({"type": "tool", "server": call["server"], "tool": call["tool"], "status": "ok",
+                    "ms": last.get("ms"), "label": TOOL_LABELS.get(call["tool"], f"{call['server']}.{call['tool']}")})
     return {"tool_results": results, "detail": ", ".join(f"{c['server']}.{c['tool']}" for c in calls)}
 
 
@@ -240,7 +275,9 @@ def persist_turn(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
     pending: dict[str, Any] | None = None
     if status == "needs_clarification" and req.get("intent", "unknown") != "unknown":
         p = outcome.get("pending") or {}
-        pending = {"intent": req["intent"], "service": req["service"], "entities": p.get("entities", req.get("entities", {})),
+        # An agent may hand the conversation to another operation (e.g. an email's meeting -> create_event).
+        pending = {"intent": p.get("intent", req["intent"]), "service": p.get("service", req["service"]),
+                   "entities": p.get("entities", req.get("entities", {})),
                    "awaiting": p.get("awaiting", []), "question": state.get("response")}
         if p.get("candidates"):
             pending |= {"candidates": p["candidates"], "candidate_type": p.get("candidate_type", "event")}
@@ -256,6 +293,7 @@ def persist_turn(state: WorkflowState, d: WorkflowDeps) -> dict[str, Any]:
         "context_notes": req.get("notes"), "workflow": state.get("workflow"), "data": outcome.get("data"),
         "error": state.get("error"), "trace": state.get("trace", []), "llm_calls": list(d.llm_calls),
         "mcp_calls": list(d.gateway.calls), "mcp_transport": d.gateway.transport,
+        "request_id": current_correlation_id(), "execution_id": current_context().get("execution_id"),
     }
     msg = Message(conversation_id=d.conversation.id, role="assistant", content=state["response"], meta=meta)
     d.db.add(msg)

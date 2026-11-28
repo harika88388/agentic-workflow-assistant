@@ -58,6 +58,8 @@ class Entities(BaseModel):
     time: str | None = None
     end_time: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    location: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     query: str | None = None
     message_id: str | None = None
     event_id: str | None = None

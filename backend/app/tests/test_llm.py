@@ -4,7 +4,9 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings
-from app.services.llm.base import ChatMessage, LLMConfigError, LLMProviderError, LLMResponseError
+from app.services.llm.base import (
+    ChatMessage, LLMConfigError, LLMProviderError, LLMResponseError, llm_time_budget, post_json,
+)
 from app.services.llm.gemini import GeminiProvider
 from app.services.llm.openrouter import OpenRouterProvider
 from app.services.llm.router import LLMRole, LLMRouter
@@ -101,6 +103,29 @@ def test_openrouter_retries_503(monkeypatch):
         n.append(1)
         return httpx.Response(503) if len(n) == 1 else httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
     assert _or(h).complete([ChatMessage("user", "u")], model="m", temperature=0, max_tokens=5) == "ok" and len(n) == 2
+
+
+def test_attempts_and_retries_share_the_turn_time_budget(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    timeouts = []
+
+    def slow_503(req):
+        timeouts.append(req.extensions["timeout"]["read"])
+        clock[0] += 50
+        return httpx.Response(503)
+    with llm_time_budget(120), pytest.raises(LLMProviderError, match="time budget"):
+        post_json("https://or.test", headers={}, payload={}, timeout=100, max_retries=5,
+                  transport=httpx.MockTransport(slow_503), sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+    assert timeouts == [100, 69, 17]  # each attempt gets only what is left; no attempt starts with < 5 s
+
+
+def test_an_exhausted_budget_fails_without_calling_the_provider():
+    calls = []
+    with llm_time_budget(1), pytest.raises(LLMProviderError, match="time budget"):
+        post_json("https://or.test", headers={}, payload={}, timeout=100, max_retries=2,
+                  transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200, json={})))
+    assert calls == []
 
 
 def test_gemini_maps_roles_system_and_skips_thought_parts():

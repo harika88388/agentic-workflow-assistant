@@ -1,31 +1,42 @@
+import logging
 import uuid
 
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.core.logging_context import bind
 from app.core.security import TokenError, decode_access_token
 from app.database.models import User
 from app.database.session import get_db
 
 bearer = HTTPBearer(auto_error=False)
+log = logging.getLogger("app.auth")
+
+
+def _unauthorized(reason: str, detail: str | dict = "Not authenticated") -> HTTPException:
+    log.warning("authentication failed reason=%s", reason)
+    return HTTPException(status.HTTP_401_UNAUTHORIZED, detail, headers={"WWW-Authenticate": "Bearer"})
 
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(bearer), db: Session = Depends(get_db)
 ) -> User:
-    unauthorized = HTTPException(
-        status.HTTP_401_UNAUTHORIZED, "Not authenticated", headers={"WWW-Authenticate": "Bearer"}
-    )
     if creds is None:
-        raise unauthorized
+        raise _unauthorized("missing_token")
     try:
         user_id: uuid.UUID = decode_access_token(creds.credentials)
-    except TokenError:
-        raise unauthorized from None
+    except TokenError as exc:
+        if isinstance(exc.__cause__, jwt.ExpiredSignatureError):
+            raise _unauthorized("session_expired", {"code": "session_expired",
+                                                    "message": "Your session has expired. Please sign in again."}) from None
+        raise _unauthorized("invalid_token") from None
     user = db.get(User, user_id)
     if user is None or not user.is_active:
-        raise unauthorized
+        raise _unauthorized("unknown_or_inactive_user")
+    bind(user_id=str(user.id))
+    log.debug("authenticated user_id=%s", user.id)
     return user
 
 

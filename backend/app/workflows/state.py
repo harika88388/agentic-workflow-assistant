@@ -1,6 +1,7 @@
 """LangGraph state and per-run dependencies for the chat workflow."""
 import operator
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Any, Literal, TypedDict
@@ -55,3 +56,4 @@ class WorkflowDeps:
     ctx: ConversationContext | None = None
     user_message_id: uuid.UUID | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    progress: Callable[[dict[str, Any]], None] = lambda event: None  # live progress for the streaming UI

@@ -48,8 +48,15 @@ def test_search_agent_calls_mcp_then_lists_and_remembers_results():
     step = a.step(ctx("search_emails", {"person": "professor"}))
     assert step.kind == "tool_calls" and step.tool_calls[0].tool == "search_emails"
     assert step.tool_calls[0].arguments == {"query": "from:professor", "max_results": 10}
-    done = a.step(ctx("search_emails", {"person": "professor"}, results={"search": {"messages": [email("m1"), email("m2")]}}))
+    found = {"search": {"messages": [email("m1"), email("m2")]}}
+    reads = a.step(ctx("search_emails", {"person": "professor"}, results=found))
+    assert [(c.key, c.tool, c.arguments) for c in reads.tool_calls] == [
+        ("read:m1", "read_email", {"message_id": "m1"}), ("read:m2", "read_email", {"message_id": "m2"})]
+    # the answering model is unavailable here (no scripted reply): fall back to listing, never to guessing
+    done = a.step(ctx("search_emails", {"person": "professor"},
+                      results={**found, "read:m1": {"message": email("m1")}, "read:m2": {"message": email("m2")}}))
     assert done.kind == "result" and "2 matching" in done.message and [e["id"] for e in done.memory["emails"]] == ["m1", "m2"]
+    assert "couldn't analyze" in done.message and done.data["analysis_error"] == "LLMResponseError"
 
 
 def test_summarization_agent_reads_emails_then_uses_summarization_role():
@@ -140,11 +147,40 @@ def test_create_event_checks_conflicts_before_proposing():
     a = build_calendar_agents()["create_event"]
     e = {"person": "Rahul Sharma", "date": "2026-11-25", "time": "15:00"}
     step = a.step(ctx("create_event", e))
-    assert step.tool_calls[0].tool == "check_availability"
-    assert step.tool_calls[0].arguments == {"start": "2026-11-25T15:00:00+05:30", "end": "2026-11-25T16:00:00+05:30"}
-    out = a.step(ctx("create_event", e, results={"availability": {"is_free": False}}))
+    assert [(c.key, c.tool, c.arguments) for c in step.tool_calls] == [
+        ("availability", "check_availability", {"start": "2026-11-25T15:00:00+05:30", "end": "2026-11-25T16:00:00+05:30"}),
+        ("existing", "list_events", {"on_date": "2026-11-25"})]
+    other = event("x", "Dentist", "2026-11-25T15:00:00+05:30", "2026-11-25T15:30:00+05:30")
+    out = a.step(ctx("create_event", e, results={"availability": {"is_free": False}, "existing": {"events": [other]}}))
     assert out.kind == "proposal" and out.proposal.request["title"] == "Meeting with Rahul Sharma"
     assert "already have something" in out.proposal.preview and "won't be invited" in out.proposal.preview
+    assert out.data["conflict"] is True
+
+
+def test_create_event_does_not_duplicate_an_existing_meeting():
+    a = build_calendar_agents()["create_event"]
+    same = event("dup", "Project review", "2026-11-25T15:00:00+05:30", "2026-11-25T16:00:00+05:30", RAHUL)
+    busy = {"availability": {"is_free": False}, "existing": {"events": [same]}}
+    by_title = a.step(ctx("create_event", {"title": "project review", "date": "2026-11-25", "time": "15:00"}, results=busy))
+    assert by_title.kind == "result" and "already in your calendar" in by_title.message
+    assert by_title.data["duplicate"]["id"] == "dup" and by_title.memory["last_event_id"] == "dup"
+    by_attendee = a.step(ctx("create_event", {"title": "Catch-up", "attendees": ["rahul@x.com"], "date": "2026-11-25",
+                                              "time": "15:00"}, results=busy))
+    assert by_attendee.kind == "result" and "already in your calendar" in by_attendee.message
+    # same title at a different time is a different meeting
+    later = a.step(ctx("create_event", {"title": "Project review", "date": "2026-11-25", "time": "17:00"},
+                       results={"availability": {"is_free": True}, "existing": {"events": [same]}}))
+    assert later.kind == "proposal"
+
+
+def test_create_event_carries_location_and_description_into_the_proposal():
+    a = build_calendar_agents()["create_event"]
+    e = {"title": "Design sync", "date": "2026-11-25", "time": "18:30", "location": "https://meet.google.com/abc-defg-hij",
+         "description": "From the email \"Sync\" sent by aa3corner."}
+    out = a.step(ctx("create_event", e, results={"availability": {"is_free": True}, "existing": {"events": []}}))
+    assert out.kind == "proposal"
+    assert out.proposal.request["location"] == e["location"] and out.proposal.request["description"] == e["description"]
+    assert "Location: https://meet.google.com/abc-defg-hij" in out.proposal.preview
 
 
 def test_availability_and_get_events_report_mcp_results():

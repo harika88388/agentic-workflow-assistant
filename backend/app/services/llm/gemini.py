@@ -1,6 +1,6 @@
 import httpx
 
-from app.services.llm.base import ChatMessage, LLMConfigError, LLMResponseError, post_json
+from app.services.llm.base import ChatMessage, LLMConfigError, LLMResponseError, post_json, record_usage
 
 
 class GeminiProvider:
@@ -36,4 +36,6 @@ class GeminiProvider:
         text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
         if not text.strip():
             raise LLMResponseError("model returned empty content")
+        usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
+        record_usage(usage.get("promptTokenCount"), usage.get("candidatesTokenCount"), usage.get("totalTokenCount"))
         return text

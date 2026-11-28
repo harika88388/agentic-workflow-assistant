@@ -1,12 +1,15 @@
 """Role-based model routing. One model can serve every role; each role can be overridden independently by env."""
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 
 from app.core.config import Settings
 from app.core.logging_context import current_correlation_id
-from app.services.llm.base import ChatMessage, LLMConfigError, LLMProvider
+from app.services.llm.base import ChatMessage, LLMConfigError, LLMProvider, take_usage
 
 
 class LLMRole(str, Enum):
@@ -83,18 +86,47 @@ class LLMRouter:
         cfg = self.config_for(role)
         request_id = current_correlation_id()
         started = time.perf_counter()
-        log.info("LLM provider selected request_id=%s role=%s provider=%s model=%s",
-                 request_id, role.value, cfg.provider, cfg.model)
+        log.debug("LLM provider selected request_id=%s role=%s provider=%s model=%s",
+                  request_id, role.value, cfg.provider, cfg.model)
+        take_usage()
+        metric: dict = {"role": role.value, "provider": cfg.provider, "model": cfg.model}
         try:
             result = self._provider(cfg.provider).complete(
                 messages, model=cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_tokens,
                 json_mode=json_mode and cfg.json_mode)
         except Exception as exc:
+            metric |= {"ok": False, "duration_ms": round((time.perf_counter() - started) * 1000),
+                       "error": type(exc).__name__}
+            _record(metric)
             log.error("LLM execution failed request_id=%s role=%s provider=%s model=%s exception_type=%s "
                       "duration_ms=%d", request_id, role.value, cfg.provider, cfg.model, type(exc).__name__,
-                      round((time.perf_counter() - started) * 1000))
+                      metric["duration_ms"])
             raise
-        log.info("LLM execution completed request_id=%s role=%s provider=%s model=%s status=success duration_ms=%d",
-                 request_id, role.value, cfg.provider, cfg.model,
-                 round((time.perf_counter() - started) * 1000))
+        usage = take_usage() or {}
+        metric |= {"ok": True, "duration_ms": round((time.perf_counter() - started) * 1000), **usage}
+        _record(metric)
+        log.info("LLM execution completed request_id=%s role=%s provider=%s model=%s status=success duration_ms=%d "
+                 "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                 request_id, role.value, cfg.provider, cfg.model, metric["duration_ms"],
+                 usage.get("prompt_tokens", "-"), usage.get("completion_tokens", "-"), usage.get("total_tokens", "-"))
         return result
+
+
+_metrics: ContextVar[list[dict] | None] = ContextVar("llm_metrics", default=None)
+
+
+def _record(metric: dict) -> None:
+    sink = _metrics.get()
+    if sink is not None:
+        sink.append(metric)
+
+
+@contextmanager
+def collect_llm_metrics() -> Iterator[list[dict]]:
+    """Collect provider/model/latency/token metrics of every LLM call made inside the block (one execution)."""
+    sink: list[dict] = []
+    token = _metrics.set(sink)
+    try:
+        yield sink
+    finally:
+        _metrics.reset(token)

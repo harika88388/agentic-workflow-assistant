@@ -1,5 +1,6 @@
 """Specialized Google Calendar agents. Events are located with the existing matching module (unique / ambiguous /
 none, never a guess); create, reschedule and cancel are returned as proposals that run only after approval."""
+import logging
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -13,6 +14,7 @@ from app.integrations.calendar.timeutil import NonexistentTimeError, localize, p
 SEARCH_WINDOW_DAYS = 30
 MAX_OPTIONS = 5
 WORKDAY = (time(9, 0), time(18, 0))
+log = logging.getLogger(__name__)
 
 
 def to_event(d: dict[str, Any]) -> CalendarEvent:
@@ -104,23 +106,61 @@ class CreateEventAgent(OperationAgent):
         end = _at(d, end_t, ctx) if end_t and _at(d, end_t, ctx) > start else None
         duration = int(ctx.get("duration_minutes") or 60)
         effective_end = end or start + timedelta(minutes=duration)
-        if "availability" not in ctx.tool_results:
-            return AgentOutcome.calls(ToolCall("availability", "calendar", "check_availability",
-                                               {"start": start.isoformat(), "end": effective_end.isoformat()}))
+        r = ctx.tool_results
+        calls = []
+        if "availability" not in r:
+            calls.append(ToolCall("availability", "calendar", "check_availability",
+                                  {"start": start.isoformat(), "end": effective_end.isoformat()}))
+        if "existing" not in r:
+            calls.append(ToolCall("existing", "calendar", "list_events", {"on_date": d.isoformat()}))
+        if calls:
+            return AgentOutcome.calls(*calls)
         person = ctx.get("person")
         title = ctx.get("title") or (f"Meeting with {person}" if person else "Meeting")
         attendees = list(dict.fromkeys([*(ctx.get("attendees") or []), *([ctx.get("recipient_email")] if ctx.get("recipient_email") else [])]))
+        if dup := _duplicate(r["existing"].get("events") or [], start, title, attendees, ctx):
+            log.info("calendar duplicate event detected event_id=%s; not proposing a new event", dup.id)
+            return AgentOutcome("result", message=f"{_describe(dup, ctx)} is already in your calendar at that time, "
+                                                  f"so I haven't created another one.",
+                                data={"duplicate": compact_event(dup.__dict__ | {"attendees": []})},
+                                memory={"last_event_id": dup.id})
         request = {"title": title, "start": start.isoformat(), "end": end.isoformat() if end else None,
                    "duration_minutes": duration, "attendees": attendees}
+        for key in ("location", "description"):
+            if ctx.get(key):
+                request[key] = str(ctx.get(key))
         notes = []
-        if not ctx.tool_results["availability"].get("is_free", True):
+        if ctx.get("location"):
+            notes.append(f"Location: {ctx.get('location')}")
+        if ctx.get("description"):
+            notes.append(f"Notes: {ctx.get('description')}")
+        conflict = not r["availability"].get("is_free", True)
+        if conflict:
             notes.append("Note: you already have something in your calendar at that time.")
         if person and not attendees:
             notes.append(f"{person} won't be invited because I don't have their email address.")
         preview = (f"Create \"{title}\" on {fmt_when(start.isoformat(), ctx.tz)}–{effective_end.astimezone(ctx.tz):%H:%M}"
                    f"{' with ' + ', '.join(attendees) if attendees else ''}?" + ("\n" + "\n".join(notes) if notes else ""))
         return AgentOutcome("proposal", proposal=Proposal("calendar", self.intent, request, preview),
-                            data={"conflict": bool(notes and "already" in notes[0])})
+                            data={"conflict": conflict})
+
+
+def _duplicate(events: list[dict[str, Any]], start: datetime, title: str, attendees: list[str],
+               ctx: AgentContext) -> CalendarEvent | None:
+    """An existing event at the same start that looks like the same meeting (similar title or a shared attendee)."""
+    words = {w for w in title.casefold().split() if len(w) > 2 and w not in ("meeting", "with", "call")}
+    for e in (to_event(x) for x in events):
+        if e.status == "cancelled" or e.all_day:
+            continue
+        s = parse_iso(e.start, ctx.tz)
+        if not isinstance(s, datetime) or s.astimezone(ctx.tz) != start.astimezone(ctx.tz):
+            continue
+        theirs = {w for w in (e.summary or "").casefold().split() if len(w) > 2}
+        same_title = (e.summary or "").strip().casefold() == title.strip().casefold() or bool(words & theirs)
+        shared = bool(set(attendees) & {a.email.lower() for a in e.attendees if a.email})
+        if same_title or shared:
+            return e
+    return None
 
 
 class GetEventsAgent(OperationAgent):

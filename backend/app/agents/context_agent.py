@@ -23,6 +23,7 @@ HISTORY_LIMIT = 10
 HISTORY_MESSAGE_CHARS = 400
 MEMORY_LIST_LIMIT = 10
 
+_DATED_LOOKUPS = {"get_events", "check_availability"}
 _PRONOUN_PERSON = re.compile(r"\b(him|her|them|he|she|they)\b", re.I)
 _EMAIL_REF = re.compile(
     r"\b(it|that|this|same|latest|last|newest|most recent|first|second|third|oldest|previous)\b", re.I)
@@ -33,7 +34,8 @@ _EMAIL_DETAIL_FOLLOWUP = re.compile(
     r"\bwhen (?:is|was|did|does)\b|\bexact time\b|\bdid it mention\b",
     re.I,
 )
-_ABANDON = re.compile(r"^\s*(never ?mind|forget (it|that)|cancel that|stop|nothing|no thanks?)\b", re.I)
+_ABANDON = re.compile(r"^\s*(?:(?:never ?mind|forget (?:it|that)|cancel that|stop|nothing|no thanks?)\b"
+                      r"|(?:no|nope|not now|don'?t)\s*[.!]*\s*$)", re.I)
 _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3, "fifth": 4}
 _STOP = {"the", "a", "an", "one", "with", "my", "meeting", "event", "email", "mail", "message", "about", "that",
          "this", "please", "on", "at", "for", "to", "of", "and", "it", "is", "i", "mean"}
@@ -209,6 +211,10 @@ class ContextEnhancementAgent:
         if not continued and not email_followup and ir.requires_clarification and ir.clarification_question \
                 and ir.intent != "unknown":
             req.llm_question = ir.clarification_question
+        # Models sometimes leave "tomorrow" in the query; a lookup must not silently widen to "coming up".
+        if intent in _DATED_LOOKUPS and not entities.get("date") and resolve_date(message, ctx.reference_date):
+            entities["date"] = message.strip()
+            notes.append("date taken from the message")
         if intent in CALENDAR_INTENTS and entities.get("date"):
             text = str(entities["date"])
             resolved = resolve_date(text, ctx.reference_date)

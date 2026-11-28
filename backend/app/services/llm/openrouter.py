@@ -1,6 +1,8 @@
 import httpx
 
-from app.services.llm.base import ChatMessage, LLMConfigError, LLMProviderError, LLMResponseError, post_json
+from app.services.llm.base import (
+    ChatMessage, LLMConfigError, LLMProviderError, LLMResponseError, post_json, record_usage,
+)
 
 
 class OpenRouterProvider:
@@ -34,4 +36,6 @@ class OpenRouterProvider:
             raise LLMResponseError("unexpected response shape from OpenRouter") from exc
         if not content or not content.strip():
             raise LLMResponseError("model returned empty content (possibly ran out of tokens while reasoning)")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        record_usage(usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"))
         return content

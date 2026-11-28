@@ -2,6 +2,7 @@
 import base64
 import binascii
 import html
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from app.core.validation import is_valid_email
 
 MAX_BODY_CHARS = 20_000
 MAX_SUBJECT = 998
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,11 +117,16 @@ def decode_part(data: str, charset: str = "utf-8") -> str:
     try:
         decoded = base64.b64decode(data + "=" * (-len(data) % 4), altchars=b"-_", validate=True)
     except (binascii.Error, ValueError):
+        log.warning("gmail mime part base64url decode failed data_chars=%d", len(data))
         return ""
     try:
         return decoded.decode(charset or "utf-8", errors="replace")
     except LookupError:
+        log.info("gmail mime part has unknown charset=%s; decoded as utf-8", charset)
         return decoded.decode("utf-8", errors="replace")
+
+
+_BLOCK_TAGS = {"br", "p", "div", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "hr"}
 
 
 class _TextExtractor(HTMLParser):
@@ -127,27 +134,46 @@ class _TextExtractor(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._skip = 0
+        self._pre = 0
+        self._links: list[tuple[str, int]] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style"):
+        if tag in ("script", "style", "head", "title"):
             self._skip += 1
-        elif tag in ("br", "p", "div", "li", "tr"):
+        elif tag in _BLOCK_TAGS:
             self.parts.append("\n")
+        elif tag == "td":
+            self.parts.append(" ")
+        elif tag == "pre":
+            self._pre += 1
+        elif tag == "a":
+            self._links.append((dict(attrs).get("href") or "", len(self.parts)))
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style") and self._skip:
+        if tag in ("script", "style", "head", "title") and self._skip:
             self._skip -= 1
+        elif tag == "pre" and self._pre:
+            self._pre -= 1
+        elif tag in ("p", "div", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"):
+            self.parts.append("\n")
+        elif tag == "a" and self._links:
+            # Meeting links often exist only in the href, so keep the URL next to its anchor text.
+            href, start = self._links.pop()
+            if href.startswith(("http://", "https://")) and href not in "".join(self.parts[start:]):
+                self.parts.append(f" ({href})")
 
     def handle_data(self, data):
         if not self._skip:
-            self.parts.append(data)
+            self.parts.append(data if self._pre else re.sub(r"\s+", " ", data))
 
 
 def html_to_text(markup: str) -> str:
     p = _TextExtractor()
     p.feed(markup)
     p.close()
-    return re.sub(r"\n{3,}", "\n\n", html.unescape("".join(p.parts))).strip()
+    text = re.sub(r"[ \t\r\f\v]+", " ", html.unescape("".join(p.parts)))
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _walk(part: dict):
@@ -165,14 +191,32 @@ def _charset(part: dict) -> str:
     return header.get_content_charset() or "utf-8"
 
 
+def _is_attachment(part: dict) -> bool:
+    return bool(part.get("filename")) or _header(part, "Content-Disposition").strip().lower().startswith("attachment")
+
+
+def referenced_text_parts(payload: dict) -> list[dict]:
+    """Body text parts whose content Gmail returned by reference (body.attachmentId, no inline data). Gmail does
+    this for large parts; the caller must fetch them before `parse_message` can read the body."""
+    if not isinstance(payload, dict):
+        return []
+    out = []
+    for p in _walk(payload):
+        body = p.get("body")
+        if (p.get("mimeType") in ("text/plain", "text/html") and not _is_attachment(p) and isinstance(body, dict)
+                and body.get("attachmentId") and not body.get("data")):
+            out.append(p)
+    return out
+
+
 def extract_text(payload: dict) -> str:
     if not isinstance(payload, dict):
         return ""
     plain: list[str] = []
     markup: list[str] = []
     for p in _walk(payload):
-        if p.get("filename"):
-            continue  # attachment
+        if _is_attachment(p):
+            continue
         part_body = p.get("body")
         data = part_body.get("data") if isinstance(part_body, dict) else None
         if not isinstance(data, str) or not data:
@@ -184,6 +228,19 @@ def extract_text(payload: dict) -> str:
             markup.append(decode_part(data, _charset(p)))
     text = "\n".join(plain).strip() or html_to_text("\n".join(markup))
     return text if len(text) <= MAX_BODY_CHARS else text[:MAX_BODY_CHARS] + "\n[truncated]"
+
+
+def describe_payload(payload: dict, body_text: str) -> dict:
+    """Shape of a parsed message for logs: part counts and which text source produced the body (never content)."""
+    parts = list(_walk(payload)) if isinstance(payload, dict) else []
+    texts = [p for p in parts if not _is_attachment(p) and isinstance(p.get("body"), dict) and p["body"].get("data")]
+    plain = sum(1 for p in texts if p.get("mimeType") == "text/plain")
+    markup = sum(1 for p in texts if p.get("mimeType") == "text/html")
+    source = "empty" if not body_text else "text/plain" if plain else "text/html" if markup else "unknown"
+    return {"mime_type": payload.get("mimeType", "") if isinstance(payload, dict) else "", "mime_parts": len(parts),
+            "text_plain_parts": plain, "text_html_parts": markup, "body_source": source,
+            "body_chars": len(body_text), "truncated": body_text.endswith("[truncated]"),
+            "attachments": sum(1 for p in parts if _is_attachment(p))}
 
 
 def _header(payload: dict, name: str) -> str:
@@ -201,8 +258,9 @@ def _attachments(payload: dict) -> list[dict]:
     out = []
     for p in _walk(payload):
         part_body = p.get("body")
-        if p.get("filename") and isinstance(part_body, dict) and part_body.get("attachmentId"):
-            out.append({"filename": p["filename"], "mime_type": p.get("mimeType", ""), "size": part_body.get("size", 0)})
+        if _is_attachment(p) and isinstance(part_body, dict) and (part_body.get("attachmentId") or part_body.get("data")):
+            out.append({"filename": p.get("filename") or "(unnamed attachment)", "mime_type": p.get("mimeType", ""),
+                        "size": part_body.get("size", 0)})
     return out
 
 

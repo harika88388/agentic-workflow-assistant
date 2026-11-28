@@ -1,6 +1,7 @@
 """Centralised, validated configuration loaded from environment / .env."""
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from pydantic import field_validator, model_validator
@@ -23,6 +24,13 @@ GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"  # legacy credentials remain supported
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+# Must match the route in app/api/routes/auth.py (router prefix /api + /auth + /google/callback).
+OAUTH_CALLBACK_PATH = "/api/auth/google/callback"
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url.strip())
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
 
 
 class Settings(BaseSettings):
@@ -42,6 +50,9 @@ class Settings(BaseSettings):
 
     frontend_url: str = "http://localhost:5173"
     cors_origins: str = "http://localhost:5173"
+    # Set by Vercel at runtime (e.g. "agentic-workflow-assistant.vercel.app"). Used only as a fallback when the
+    # public URLs above were left at their localhost defaults in production.
+    vercel_project_production_url: str = ""
 
     # --- LLM (Phase 6) ---
     openrouter_api_key: str = ""
@@ -60,6 +71,8 @@ class Settings(BaseSettings):
     task_llm_model: str = ""
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
+    # Total LLM time per conversation turn; keeps a turn inside the 300 s Vercel function limit (vercel.json).
+    llm_turn_budget_seconds: float = 240.0
     llm_max_tokens: int = 4096  # R1 "thinking" tokens count against this
 
     # --- MCP ---
@@ -67,6 +80,15 @@ class Settings(BaseSettings):
     # inprocess: same servers and protocol over an in-memory transport (tests / single-process deployments).
     mcp_transport: str = "stdio"
     mcp_timeout_seconds: float = 60.0
+
+    @field_validator("database_url")
+    @classmethod
+    def _psycopg_driver(cls, v: str) -> str:
+        # Hosted providers (Neon, Supabase, Vercel Marketplace) hand out plain postgres:// URLs.
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg://" + v[len(prefix):]
+        return v
 
     @field_validator("mcp_transport")
     @classmethod
@@ -113,6 +135,19 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _derive_public_urls(self) -> "Settings":
+        host = self.vercel_project_production_url.strip().removeprefix("https://").strip("/")
+        if host and self.is_production:
+            base = f"https://{host}"
+            if "localhost" in self.frontend_url:
+                self.frontend_url = base
+            if "localhost" in self.cors_origins:
+                self.cors_origins = base
+            if "localhost" in self.google_redirect_uri:
+                self.google_redirect_uri = base + OAUTH_CALLBACK_PATH
+        return self
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -120,6 +155,27 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
+
+    @property
+    def oauth_javascript_origin(self) -> str:
+        return _origin(self.frontend_url)
+
+    def oauth_config_problems(self) -> list[str]:
+        """Misconfigurations that make Google reject the sign-in (redirect_uri_mismatch) or break the callback."""
+        problems = []
+        uri = self.google_redirect_uri.strip()
+        if not (self.google_client_id and self.google_client_secret):
+            problems.append("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are not set")
+        if urlsplit(uri).path != OAUTH_CALLBACK_PATH:
+            problems.append(f"GOOGLE_REDIRECT_URI path must be {OAUTH_CALLBACK_PATH}")
+        if self.is_production:
+            if not uri.startswith("https://") or "localhost" in uri:
+                problems.append("GOOGLE_REDIRECT_URI must be the public https URL in production")
+            if "localhost" in self.frontend_url:
+                problems.append("FRONTEND_URL points to localhost in production")
+            if _origin(uri) != _origin(self.frontend_url):
+                problems.append("GOOGLE_REDIRECT_URI and FRONTEND_URL are on different origins")
+        return problems
 
 
 @lru_cache
